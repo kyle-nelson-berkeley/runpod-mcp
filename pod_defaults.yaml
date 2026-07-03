@@ -1,0 +1,57 @@
+# =============================================================================
+# pod_defaults.yaml — committed pod spec for the runpod MCP server. NO SECRETS.
+#
+# The API key lives ONLY in the macOS Keychain (service "runpod-api-key",
+# account "kyle") and is fetched by config.py at server startup.
+#
+# GPU/image choices mirror runbook/RUNBOOK.md + runbook/pod_setup.sh:
+# IsaacSim 4.5.0 needs driver >= 535.129.03 (allowed_cuda_versions >= 12.4
+# guarantees that floor at scheduling time) on an Ubuntu 22.04 image.
+# NGC fallback image (nvcr.io/nvidia/isaac-sim:4.5.0) is a manual swap — it
+# has no sshd; see README.md before ever switching.
+# =============================================================================
+
+pod_name: lts-replication
+cloud_type: SECURE
+gpu_type_ids: ["NVIDIA GeForce RTX 4090"]
+gpu_count: 1
+interruptible: false          # guardrails.py FORCES this false regardless
+image_name: runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+allowed_cuda_versions: ["12.4", "12.5", "12.6", "12.7", "12.8"]
+container_disk_gb: 30
+volume_mount_path: /workspace
+ports: ["22/tcp"]
+support_public_ip: true
+
+# Network volume: survives pod termination; pins the pod to one datacenter.
+network_volume_name: lts-replication
+network_volume_gb: 60
+# Ordered DC candidates for volume creation (first with 4090 stock wins).
+# Live-verified 2026-07-03 via unauth GraphQL: EU-RO-1 / US-TX-3 / EUR-IS-1
+# show 4090 stock; US-KS-2 / US-GA-2 return null. EU-RO-1 first — the
+# account's existing 60 GB volume lives there.
+datacenter_preference: ["EU-RO-1", "US-TX-3", "EUR-IS-1", "US-KS-2", "US-GA-2"]
+
+# Local paths
+ssh_identity: ~/.ssh/id_ed25519
+known_hosts_file: ~/.ssh/known_hosts_runpod
+local_log_dir: logs/pod       # relative to repo root; gitignored
+
+# Cost guardrails (informational — the hard stop is RunPod's account limit)
+budget_usd: 50
+idle_minutes: 60              # idle_watchdog stops the pod after this
+
+# Wall-clock ceilings (seconds) for detached jobs — job_wrapper.sh `timeout`
+timeouts:
+  setup_sec: 5400             # pod_setup.sh first run: 30-60 min
+  training_sec: 3600          # one policy: 10-20 min + margin
+  sweep_sec: 3600             # axis sanity sweep incl. first sim warm-up
+  job_sec: 3600               # generic run_job default
+  exec_max_sec: 600           # exec_on_pod synchronous ceiling
+
+# ensure_pod polling for publicIp / port mapping / SSH readiness
+poll:
+  budget_sec: 300
+  interval_sec: 10
+
+min_driver_version: "535.129.03"
