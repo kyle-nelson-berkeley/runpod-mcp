@@ -27,6 +27,11 @@ cd "$JOB_DIR" || exit 97
 echo $$ > pid
 touch /workspace/.keepalive
 
+# Detached BatchMode SSH shells carry a bogus TERM ('ansi+tabs') that kills
+# isaaclab.sh with "unknown terminal type" — pin the same value as
+# pod_setup.sh's nohup fix.
+export TERM=xterm
+
 # --kill-after: SIGKILL 60s after SIGTERM — a job that traps/ignores TERM
 # must never outlive the ceiling (that would also defeat auto-stop)
 timeout --kill-after=60 "$MAX_RUNTIME_SEC" bash cmd.sh >> out.log 2>&1

@@ -65,6 +65,17 @@ def test_wrapper_records_pid_and_keepalive():
     assert "touch /workspace/.keepalive" in text
 
 
+def test_wrapper_exports_sane_term_before_running_cmd():
+    # Detached BatchMode shells carry a bogus TERM ('ansi+tabs') that kills
+    # isaaclab.sh with "unknown terminal type" (observed live: first
+    # launch_training run, job 20260706-145815, 2026-07-06). Same fix class
+    # as pod_setup.sh's nohup TERM pin.
+    text = WRAPPER.read_text()
+    term_pos = text.index("export TERM=xterm")
+    cmd_pos = text.index("bash cmd.sh")
+    assert term_pos < cmd_pos                 # TERM pinned before the payload runs
+
+
 # ------------------------------------------------------------ idle_watchdog
 
 def test_watchdog_pod_id_via_argv_never_env():
