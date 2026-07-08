@@ -32,6 +32,15 @@ touch /workspace/.keepalive
 # pod_setup.sh's nohup fix.
 export TERM=xterm
 
+# Redirect the CUDA-JIT + GL-shader DISK caches onto the volume so a completed
+# compile survives a pod stop (/root is wiped on every stop). Defensive / one-
+# time-ifying — NOT a confirmed fix for the boot-hang. mkdir first: a missing
+# target dir makes CUDA/GL silently DISABLE caching.
+mkdir -p /workspace/omniverse-cache/computecache /workspace/omniverse-cache/glcache
+export CUDA_CACHE_PATH=/workspace/omniverse-cache/computecache
+export __GL_SHADER_DISK_CACHE=1
+export __GL_SHADER_DISK_CACHE_PATH=/workspace/omniverse-cache/glcache
+
 # --kill-after: SIGKILL 60s after SIGTERM — a job that traps/ignores TERM
 # must never outlive the ceiling (that would also defeat auto-stop)
 timeout --kill-after=60 "$MAX_RUNTIME_SEC" bash cmd.sh >> out.log 2>&1
