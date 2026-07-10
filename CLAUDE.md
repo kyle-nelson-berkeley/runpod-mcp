@@ -39,3 +39,50 @@ a human touching SSH.
 - Jobs are detached by design: pod-side nohup wrapper writes
   status/log files under `/workspace`; `job_status` polls them. Never
   add a blocking tool.
+
+## D · The `supervise` CLI (a background command, NOT a 15th tool)
+
+`python -m runpod_mcp.supervise` (wrapper: `supervise.sh`) chains the whole
+run-a-job dance — verify-pod-running → derive a finite wall-clock cap →
+`launch(auto_stop=false)` → poll `job_status` → **unconditionally pull the
+job's own `/workspace/jobs/<job_id>/` dir** + `sync_logs` + `spend_report`
+→ `stop_pod` → durable JSON summary — into **one command the agent fires
+once (as a `run_in_background` Bash task) and is notified about on
+completion**. The tool surface stays **14** on purpose: a poll-for-minutes
+tool would block the stdio server ("never add a blocking tool" above), so
+this lives Mac-side as a background CLI reusing `tools.*` — same guardrails,
+zero logic duplication.
+
+- **`auto_stop=false` always**: `auto_stop=true` stops the pod the instant
+  the job ends, *before* `sync_logs` can run — so the supervisor owns the
+  stop and sync-then-stops itself.
+- **Money-safety = two exits, never a third**: normal completion →
+  `stop_pod()`; or `--max-wait` elapsed while still `running` → ANOMALY →
+  best-effort sync + `stop_pod(force=True)` + a `force_stopped` summary flag
+  + non-zero exit. `--max-wait` is ALWAYS finite (dry-run derives
+  `max_runtime_sec` from `pod_defaults.yaml` + a 300 s backstop) and the poll
+  sleep is bounded by the remaining time, so the deadline is a hard cap on the
+  *decision to stop*. A launch *refusal* (bad vehicle/dr, one-job guard,
+  vehicle gate) → **no stop** (the agent fixes and retries; a stop would force
+  a ~5-min `ensure_pod`), exit 2. **Never `terminate_pod`.**
+  - *Residual (accepted, by design):* in the ANOMALY path the best-effort
+    capture (rsync pull + `sync_logs`) runs *before* the force-stop — the
+    DATA-CAPTURE directive wants a timed-out run's partial logs, and by the
+    deadline the job is normally already past its own pod-side
+    `timeout --kill-after` ceiling. If SSH is hung, that capture can delay the
+    force-stop up to the rsync timeout; the stop still always follows (bounded,
+    never unbounded) and the pod-side idle watchdog is the hard backstop.
+- **The durable JSON summary is the recovery contract** (`logs/pod/
+  supervise-<job_id>.json`): a later session reads it to confirm whether the
+  pod was stopped, so *safety never depends on the completion notification
+  landing*.
+- **Liveness caveats (documented, not solved):** `supervise.sh` wraps in
+  `caffeinate -i`, which holds off *idle* sleep only — it does **not** stop
+  clamshell/lid-close sleep on battery. And whether a `run_in_background`
+  Bash task survives WarmLifecycle idle-reaping of its parent session is
+  **unverified**. Either way the *safety* outcome is held by the pod-side
+  idle watchdog + the job's own `timeout --kill-after` ceiling; only the
+  notification ergonomic degrades.
+- `--sync-subdir` is REQUIRED in `--job-name` mode (pass `none` to skip the
+  analysis sync — the job-dir pull still happens regardless); `--training`
+  defaults it to `rsl_rl/warpauv_direct`.

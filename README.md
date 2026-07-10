@@ -17,7 +17,9 @@ here with cost guardrails in code.
                                             ssh.py        hardened ssh/scp/rsync; known_hosts_runpod; 60s conn cache
                                             jobs.py       detached jobs: /workspace/jobs/<id>/{cmd.sh,pid,out.log,exit_code,meta.json}
                                             training.py   DR tables (RUNBOOK/yaml-cross-checked) + verbatim train cmd
+                                            supervise.py  Mac-side background CLI: launch→poll→pull→sync→spend→stop (reuses tools.*)
                                             remote/       job_wrapper.sh · idle_watchdog.sh · apply_bluerov2_patch.py
+supervise.sh → caffeinate -i wrapper around  python -m runpod_mcp.supervise
 ```
 
 - **Stateless**: "the pod" = whatever `GET /pods` returns named
@@ -76,14 +78,53 @@ the patch script is exercised against committed fixture excerpts of the
 pinned `7c5ebe7` sources (plus a SHA-gated test against the real reference
 clone when present — read-only, tmp copies).
 
+`test_supervise.py` drives the `supervise` CLI's core with injected fakes +
+a fake clock (no real waiting), covering every safety branch: normal
+completion, job failure, max-wait force-stop, pod-not-running refusal, launch
+refusal, transient poll errors, capture-failure-still-stops, `--no-stop`, and
+`terminate_pod` is asserted never-called in every case.
+
 Root-repo `pytest -q` ignores this folder (`conftest.py` `collect_ignore`) —
 the lean root venv has no `mcp`/`httpx`.
+
+## Supervised runs (`supervise.sh`)
+
+One command that chains an entire run — verify-pod-running → dry-run-derive a
+**finite** wall-clock cap → `launch(auto_stop=false)` → poll `job_status` →
+unconditionally pull `/workspace/jobs/<job_id>/` + `sync_logs` +
+`spend_report` → `stop_pod` → durable JSON summary — so the agent fires it
+**once as a background task** and is notified on completion. It reuses
+`runpod_mcp.tools.*` (no logic duplication, all guardrails inherited) and
+never calls `terminate_pod`. This is a Mac-side CLI, **not** a 15th MCP tool:
+a poll-for-minutes tool would block the stdio server.
+
+```
+# training run (background task)
+supervise.sh --training curee --dr DR_0 --seed 1 \
+    [--interval 45] [--max-wait N] [--backstop 300] [--no-stop] \
+    [--sync-subdir rsl_rl/warpauv_direct] [--summary-path PATH]
+
+# generic job — --sync-subdir REQUIRED (pass 'none' to skip the analysis sync;
+# the job-dir pull always happens)
+supervise.sh --job-name eval --command "…" --workdir /workspace \
+    --sync-subdir <dir|none> [--max-runtime-sec N]
+```
+
+Money-safety: the poll loop has exactly two exits — normal completion →
+`stop_pod`; or `--max-wait` (always finite) elapsed while still `running` →
+force-stop + non-zero exit + `force_stopped` summary flag. A launch *refusal*
+→ no stop (fix and retry), exit 2. The `logs/pod/supervise-<job_id>.json`
+summary is the recovery contract (a later session reconciles stop state from
+it). Liveness caveats: `caffeinate -i` guards idle sleep but not lid-close;
+`run_in_background` survival across WarmLifecycle reaping is unverified — the
+pod-side idle watchdog + job `timeout` ceiling are the guaranteed backstop.
 
 ## Dry runs
 
 `ensure_pod`, `run_pod_setup`, `run_job`, `launch_training`,
 `apply_bluerov_patches` all take `dry_run=true` and return the exact would-be
-payloads/edits/commands without mutating anything ($0).
+payloads/edits/commands without mutating anything ($0). `supervise` uses this
+dry-run path to derive its finite `--max-wait` before the real launch.
 
 ## NGC fallback image (manual swap — read first)
 
