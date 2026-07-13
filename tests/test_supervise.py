@@ -350,6 +350,112 @@ def test_launch_refusal_no_poll_no_stop(monkeypatch, tmp_path, err):
     assert str(err) in summary["reason"] or err.args[0] in summary["reason"]
 
 
+# ============================ 5b. launch SSH-reply timeout -> adopt live job
+
+def test_launch_ssh_timeout_adopts_running_job_and_stops(monkeypatch, tmp_path):
+    """The documented-benign launch-SSH-reply timeout: the detach succeeded
+    (job is RUNNING) but the reply was lost, so tools.launch_training raises
+    ssh.SSHError. supervise must NOT refuse — it probes pod_status, finds the
+    live job whose id is embedded in the timeout message, adopts it, and runs
+    the full poll -> capture -> stop path."""
+    JOB_ID = "20260713-142044_clean-rollout-dr0-model399_4362"
+    timeout_exc = ssh.SSHError(
+        "ssh to 1.2.3.4:2222 timed out after 60s running: touch "
+        "/workspace/.keepalive && setsid bash /workspace/jobs/job_wrapper.sh "
+        f"'/workspace/jobs/{JOB_ID}' 'pod5ln8' '1500' '0'")
+    calls = []
+    rt = _make_rt(calls, local_log_dir=tmp_path)
+    # gate call: running pod, no live job yet; adoption-probe call (after the
+    # failed-reply detach): our job is now live.
+    seq = {"i": 0}
+
+    def pod_status(rt):
+        seq["i"] += 1
+        return ({"status": "running"} if seq["i"] == 1
+                else {"status": "running", "active_jobs": [JOB_ID]})
+    monkeypatch.setattr(supervise.tools, "pod_status", pod_status)
+    make_launch_training(monkeypatch, launch_error=timeout_exc)
+    make_job_status(monkeypatch, [
+        {"state": "succeeded", "exit_code": 0, "latest_reward_line": "Mean reward: 96.1"},
+    ])
+    make_capture_fakes(monkeypatch, calls)
+
+    spec = supervise.JobSpec(mode="training", vehicle="curee", dr="DR_0")
+    clock = FakeClock()
+    summary = supervise.supervise(rt, spec, sleep=clock.sleep, now=clock.now, log=NOLOG)
+
+    assert summary["job_id"] == JOB_ID
+    assert summary["adopted_after_launch_timeout"] is True
+    assert summary["state"] == "succeeded"
+    assert summary["process_exit_code"] == 0
+    # the capture/stop path ran against the ADOPTED id
+    rsync_calls = [kw for name, kw in calls if name == "rsync_pull"]
+    assert rsync_calls and rsync_calls[0]["remote_dir"] == f"/workspace/jobs/{JOB_ID}/"
+    stop_calls = [kw for name, kw in calls if name == "stop_pod"]
+    assert stop_calls == [{"force": False}]
+    # the durable recovery contract records the adoption
+    on_disk = json.loads((tmp_path / f"supervise-{JOB_ID}.json").read_text())
+    assert on_disk["adopted_after_launch_timeout"] is True
+
+
+def test_launch_ssh_error_no_live_job_still_refuses(monkeypatch, tmp_path):
+    """Safety case: an SSHError from an EARLIER launch call (nothing detached)
+    leaves no live job. The adoption probe finds none -> supervise still
+    refuses (exit 2, no poll/capture/stop) — the two-exits money-safety model
+    is preserved; a genuine pre-detach failure is never falsely adopted."""
+    calls = []
+    rt = _make_rt(calls, local_log_dir=tmp_path)
+    monkeypatch.setattr(supervise.tools, "pod_status",
+                        lambda rt: {"status": "running", "active_jobs": []})
+    make_launch_training(monkeypatch, launch_error=ssh.SSHError(
+        "ssh to 1.2.3.4:2222 timed out after 60s running: cat "
+        "/workspace/isaac-auv-env/.../warpauv_env_cfg.py"))
+
+    def _must_not_poll(*a, **kw):
+        raise AssertionError("job_status must not be called — nothing was adopted")
+    monkeypatch.setattr(supervise.tools, "job_status", _must_not_poll)
+    make_capture_fakes(monkeypatch, calls)
+
+    spec = supervise.JobSpec(mode="training", vehicle="curee", dr="DR_0")
+    clock = FakeClock()
+    summary = supervise.supervise(rt, spec, sleep=clock.sleep, now=clock.now, log=NOLOG)
+
+    assert summary["process_exit_code"] == 2
+    assert summary["refused"] is True
+    assert summary["job_id"] is None
+    assert calls == []   # no poll, no capture, no stop
+
+
+def test_launch_ssh_error_unparseable_id_adopts_sole_live_job(monkeypatch, tmp_path):
+    """Fallback branch: the timeout message has no /workspace/jobs/<id> token,
+    so the id can't be parsed — but the one-job guard means the single live job
+    now must be the one we just launched, so supervise adopts it."""
+    JOB_ID = "20260713-150000_eval_ab99"
+    calls = []
+    rt = _make_rt(calls, local_log_dir=tmp_path)
+    seq = {"i": 0}
+
+    def pod_status(rt):
+        seq["i"] += 1
+        return ({"status": "running"} if seq["i"] == 1
+                else {"status": "running", "active_jobs": [JOB_ID]})
+    monkeypatch.setattr(supervise.tools, "pod_status", pod_status)
+    make_run_job(monkeypatch, job_id=JOB_ID, launch_error=ssh.SSHError(
+        "ssh to 1.2.3.4:2222 timed out after 60s running: touch /workspace/.keepalive"))
+    make_job_status(monkeypatch, [{"state": "succeeded", "exit_code": 0}])
+    make_capture_fakes(monkeypatch, calls)
+
+    spec = supervise.JobSpec(mode="job", name="eval", command="true", sync_subdir="none")
+    clock = FakeClock()
+    summary = supervise.supervise(rt, spec, sleep=clock.sleep, now=clock.now, log=NOLOG)
+
+    assert summary["job_id"] == JOB_ID
+    assert summary["adopted_after_launch_timeout"] is True
+    assert summary["process_exit_code"] == 0
+    stop_calls = [kw for name, kw in calls if name == "stop_pod"]
+    assert stop_calls == [{"force": False}]
+
+
 # ============================================== 6. capture/sync failure
 
 def test_sync_logs_failure_still_stops_nonzero_exit(monkeypatch, tmp_path):

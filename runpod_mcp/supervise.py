@@ -32,6 +32,7 @@ tests — only `rt.cfg` and `rt.ssh.rsync_pull` (the one call that bypasses
 """
 import argparse
 import json
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -49,6 +50,13 @@ REFUSE_ERRORS = (tools.ToolError, training.TrainingError, guardrails.GuardrailEr
                  jobs.JobError, ssh.SSHError)
 
 TERMINAL_STATES = frozenset({"succeeded", "failed", "orphaned", "not_found"})
+
+# A launch SSHError message embeds the detach command, which contains the
+# quoted job dir '/workspace/jobs/<job_id>'. job_id == "<stamp>_<slug>_<hex4>"
+# (jobs.new_job_id) — anchoring on the stamp shape matches the quoted job dir
+# and never the sibling /workspace/jobs/job_wrapper.sh in the same command.
+_ADOPTED_JOB_ID_RE = re.compile(
+    r"/workspace/jobs/(\d{8}-\d{6}_[a-z0-9-]+_[0-9a-f]{4})")
 
 
 def _default_log(message: str) -> None:
@@ -107,6 +115,40 @@ def _launch(rt, spec: JobSpec) -> dict:
                          auto_stop=False)
 
 
+def _adopt_after_launch_error(rt, spec: JobSpec, exc: Exception, log) -> str | None:
+    """Launch-SSHError recovery. The launch detaches the job before the SSH
+    reply (`setsid bash job_wrapper.sh ... & echo LAUNCHED`), so an SSH-reply
+    timeout can leave the job RUNNING while the reply is lost — a documented-
+    benign pattern on these pods (bugs-and-risks.md / BEHAVIORAL-CHECK.md).
+    Rather than refuse (which skips poll/sync/stop while the job burns GPU),
+    probe the pod and ADOPT the live job. Returns its job_id, or None if none is
+    confirmed live (then the job really didn't start -> caller refuses).
+
+    Liveness, not the error text, is the discriminator: a job appears in
+    pod_status active_jobs only once its wrapper has written its pid file (its
+    first action), which by the 60 s SSH timeout it long since has; an
+    SSHError from an EARLIER launch call (marker probe, push_text) never
+    detached anything, so no live job matches and we correctly refuse."""
+    m = _ADOPTED_JOB_ID_RE.search(scrub(str(exc)))
+    candidate = m.group(1) if m else None
+    try:
+        active = tools.pod_status(rt).get("active_jobs") or []
+    except REFUSE_ERRORS as probe_exc:
+        log(f"[supervise] launch SSH error; adoption probe (pod_status) failed: "
+            f"{scrub(str(probe_exc))}")
+        return None
+    if candidate and candidate in active:
+        return candidate
+    # The one-job guard already confirmed NO other job was live at launch, so a
+    # single live job now must be the one we just launched — covers a message
+    # whose id we couldn't parse (defense against error-format drift).
+    if candidate is None and len(active) == 1:
+        return active[0]
+    log(f"[supervise] launch SSH error; no matching live job to adopt "
+        f"(candidate={candidate!r}, active_jobs={active!r}) — refusing")
+    return None
+
+
 # ---------------------------------------------------------------------- exit
 
 def _determine_exit_code(*, final_state, force, errors, stop_escalated,
@@ -158,7 +200,8 @@ def _refusal(spec: JobSpec, started_at: str, log, max_wait_sec, message: str) ->
 # ---------------------------------------------------------- capture + stop
 
 def _capture_and_stop(rt, spec: JobSpec, job_id: str, last_known: dict | None,
-                      force: bool, max_wait_sec: int, started_at: str, log) -> dict:
+                      force: bool, max_wait_sec: int, started_at: str, log,
+                      adopted: bool = False) -> dict:
     """Best-effort, strictly ordered: job-dir pull -> analysis sync ->
     spend_report -> stop decision. Every step is wrapped in a BROAD
     `except Exception` — a capture failure must NEVER skip the stop."""
@@ -237,6 +280,7 @@ def _capture_and_stop(rt, spec: JobSpec, job_id: str, last_known: dict | None,
         "state": final_state,
         "exit_code": exit_code,
         "force_stopped": force,
+        "adopted_after_launch_timeout": adopted,
         "latest_reward_line": latest_reward_line,
         "pulled": pulled,
         "spend": spend,
@@ -296,16 +340,29 @@ def supervise(rt, spec: JobSpec, *, sleep=time.sleep, now=time.monotonic,
 
     # 3. LAUNCH — auto_stop=False always. A refusal here does NOT stop the
     # pod (the agent fixes-and-retries; a stop would force a ~5-min
-    # ensure_pod re-create) and runs no poll loop.
+    # ensure_pod re-create) and runs no poll loop. EXCEPTION: a launch
+    # SSH-reply timeout is documented-benign — the job detaches even when the
+    # reply is lost — so probe and ADOPT the live job instead of refusing, so
+    # capture+stop still run. SSHError is caught BEFORE the generic
+    # REFUSE_ERRORS clause: it is a member of REFUSE_ERRORS and Python matches
+    # except clauses top-to-bottom, so order is load-bearing.
+    adopted = False
     try:
         launched = _launch(rt, spec)
+    except ssh.SSHError as exc:
+        job_id = _adopt_after_launch_error(rt, spec, exc, log)
+        if job_id is None:
+            return _refusal(spec, started_at, log, max_wait_sec,
+                            f"launch refused: {scrub(str(exc))}")
+        adopted = True
     except REFUSE_ERRORS as exc:
         return _refusal(spec, started_at, log, max_wait_sec,
                         f"launch refused: {scrub(str(exc))}")
+    else:
+        job_id = launched["job_id"]
 
-    job_id = launched["job_id"]
-    log(f"[supervise] launched job_id={job_id} mode={spec.mode} "
-       f"max_wait_sec={max_wait_sec}")
+    log(f"[supervise] {'adopted' if adopted else 'launched'} job_id={job_id} "
+       f"mode={spec.mode} max_wait_sec={max_wait_sec}")
 
     # 4. POLL LOOP — exactly two exits: terminal state, or deadline while
     # still non-terminal (ANOMALY -> force stop). A job_status call raising
@@ -344,7 +401,7 @@ def supervise(rt, spec: JobSpec, *, sleep=time.sleep, now=time.monotonic,
 
     # 5/6. CAPTURE THEN STOP, then durable summary.
     return _capture_and_stop(rt, spec, job_id, last_known, force, max_wait_sec,
-                             started_at, log)
+                             started_at, log, adopted=adopted)
 
 
 # --------------------------------------------------------------------- CLI
