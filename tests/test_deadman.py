@@ -586,6 +586,135 @@ def test_default_pid_and_summary_paths_are_repo_root_anchored(monkeypatch, tmp_p
     assert expected_summary.exists()
 
 
+# ============================== 8b. fail-safe ordering: summary before pid file
+
+def _blocked_summary_path(tmp_path):
+    """A summary path whose parent.mkdir will fail (parent is a file)."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    return blocker / "summary.json"
+
+
+@pytest.mark.parametrize("stop_behavior,expected_outcome,expected_exit", [
+    ("succeed", "stopped", 0),
+    ("fail", "stop_failed", 1),
+])
+def test_fire_summary_write_failure_leaves_pid_file_and_status_reads_lost(
+        monkeypatch, tmp_path, stop_behavior, expected_outcome, expected_exit):
+    """If the fire summary can't be written (stopped AND stop_failed paths),
+    the pid file must be LEFT IN PLACE: once this process exits, a later
+    `status` then reads LOST (exit 1, check manually) — the fail-safe state.
+    Remove-then-write would instead report not_armed/an older success in the
+    exact pod-may-still-be-billing scenario."""
+    if stop_behavior == "succeed":
+        _always_stopped(monkeypatch)
+    else:
+        def stop_pod(rt, force=False):
+            raise tools.ToolError("API unreachable")
+        monkeypatch.setattr(deadman.tools, "stop_pod", stop_pod)
+
+    pid_file = tmp_path / "deadman.pid"
+    log_lines = []
+    spec = _spec(tmp_path, retries=1, pid_file=pid_file,
+                summary_path=_blocked_summary_path(tmp_path))
+    summary = deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                          now=lambda: 0.0, iso_now=lambda: ISO_T0,
+                          log=log_lines.append)
+
+    # the real outcome/exit code are unchanged by the write failure...
+    assert summary["outcome"] == expected_outcome
+    assert summary["exit_code"] == expected_exit
+    # ...but the pid file survives as the LOST beacon
+    assert pid_file.exists()
+    assert any("leaving the pid file in place" in line for line in log_lines)
+
+    # once the armed process is gone, status must read LOST, never not_armed
+    monkeypatch.setattr(deadman, "_is_deadman_process", lambda pid: False)
+    result = deadman.status(pid_file=pid_file,
+                            summary_glob=str(tmp_path / "deadman-*.json"), log=NOLOG)
+    assert result["state"] == "LOST"
+    assert result["exit_code"] == 1
+
+
+def test_cancel_summary_write_failure_leaves_pid_file_and_status_reads_lost(
+        monkeypatch, tmp_path):
+    """Cancel-path equivalent: a cancel whose summary write fails must
+    degrade to LOST, not to silence."""
+    def _must_not_stop(*a, **kw):
+        pytest.fail("stop_pod must not be called on the cancel path")
+    monkeypatch.setattr(deadman.tools, "stop_pod", _must_not_stop)
+
+    pid_file = tmp_path / "deadman.pid"
+    log_lines = []
+    spec = _spec(tmp_path, hours=3.0, pid_file=pid_file,
+                summary_path=_blocked_summary_path(tmp_path))
+    summary = deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                          now=lambda: 0.0, iso_now=lambda: ISO_T0,
+                          log=log_lines.append, cancel_requested=lambda: True)
+
+    assert summary["outcome"] == "cancelled"
+    assert summary["exit_code"] == 0
+    assert pid_file.exists()   # left as the LOST beacon
+    assert any("leaving the pid file in place" in line for line in log_lines)
+
+    monkeypatch.setattr(deadman, "_is_deadman_process", lambda pid: False)
+    result = deadman.status(pid_file=pid_file,
+                            summary_glob=str(tmp_path / "deadman-*.json"), log=NOLOG)
+    assert result["state"] == "LOST"
+    assert result["exit_code"] == 1
+
+
+def test_fire_path_writes_summary_before_removing_pid_file(monkeypatch, tmp_path):
+    """Ordering pin: on the fire path the durable summary hits disk BEFORE
+    the pid file disappears, so a crash between the two degrades to LOST."""
+    _always_stopped(monkeypatch)
+    events = []
+    real_write, real_remove = deadman._write_summary, deadman._remove
+
+    def recording_write(path, summary, log):
+        events.append(("write", path.name))
+        return real_write(path, summary, log)
+
+    def recording_remove(path):
+        events.append(("remove", path.name))
+        real_remove(path)
+
+    monkeypatch.setattr(deadman, "_write_summary", recording_write)
+    monkeypatch.setattr(deadman, "_remove", recording_remove)
+
+    spec = _spec(tmp_path, summary_path=tmp_path / "deadman-20260715-000000.json")
+    deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+               now=lambda: 0.0, iso_now=lambda: ISO_T0, log=NOLOG)
+
+    assert events == [("write", "deadman-20260715-000000.json"),
+                      ("remove", "deadman.pid")]
+
+
+def test_cancel_path_writes_summary_before_removing_pid_file(monkeypatch, tmp_path):
+    events = []
+    real_write, real_remove = deadman._write_summary, deadman._remove
+
+    def recording_write(path, summary, log):
+        events.append(("write", path.name))
+        return real_write(path, summary, log)
+
+    def recording_remove(path):
+        events.append(("remove", path.name))
+        real_remove(path)
+
+    monkeypatch.setattr(deadman, "_write_summary", recording_write)
+    monkeypatch.setattr(deadman, "_remove", recording_remove)
+
+    spec = _spec(tmp_path, hours=3.0,
+                summary_path=tmp_path / "deadman-20260715-000000.json")
+    deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+               now=lambda: 0.0, iso_now=lambda: ISO_T0, log=NOLOG,
+               cancel_requested=lambda: True)
+
+    assert events == [("write", "deadman-20260715-000000.json"),
+                      ("remove", "deadman.pid")]
+
+
 # ============================================================== 9. cancel()
 
 def test_cancel_no_pid_file_is_idempotent_noop(tmp_path):

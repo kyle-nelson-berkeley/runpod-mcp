@@ -190,21 +190,25 @@ def _base_summary(spec: ArmSpec, armed_at_iso: str, fire_at_iso: str, pid: int) 
     }
 
 
-def _write_summary(summary_path: Path, summary: dict, log) -> None:
+def _write_summary(summary_path: Path, summary: dict, log) -> bool:
     """Durable recovery contract. Wrapped so a write failure NEVER masks the
     real stop outcome already recorded in `summary` (mirrors supervise's
     summary_write handling) — on failure we log loudly (including the
-    outcome, so it's at least visible in the session's stderr) and return;
-    the caller's return value / exit code are unaffected."""
+    outcome, so it's at least visible in the session's stderr) and return
+    False; the caller's return value / exit code are unaffected. run_armed
+    uses the return value for its fail-safe ordering: the pid file may be
+    removed only after the summary is durably on disk."""
     try:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text(json.dumps(summary, indent=2))
         summary["summary_path"] = str(summary_path)
+        return True
     except Exception as exc:   # noqa: BLE001 — must never crash on the way out
         log(f"[deadman] WARNING: failed to write summary to {summary_path}: "
            f"{config.scrub(str(exc))} — outcome was {summary.get('outcome')!r}, "
            f"stop_status={summary.get('stop_status')!r} (NOT lost, just not "
            "persisted to this path)")
+        return False
 
 
 def _write_refusal_summary(spec: ArmSpec, summary_path: Path, armed_at_iso: str,
@@ -278,11 +282,18 @@ def run_armed(spec: ArmSpec, *, pid_file: Path, summary_path: Path,
     point, by construction)."""
     while True:
         if cancel_requested():
-            _remove(pid_file)
             summary = _base_summary(spec, armed_at_iso, fire_at_iso, pid)
             summary.update(outcome="cancelled", stop_status=None, attempts=[],
                           ended_at=iso_now(), pod_may_still_be_running=False)
-            _write_summary(summary_path, summary, log)
+            # Fail-safe ordering: summary FIRST, pid file second. A crash or
+            # write failure between the two leaves the pid file in place, so
+            # a later `status` reads LOST (exit 1, check manually) — never
+            # not_armed or an older success.
+            if _write_summary(summary_path, summary, log):
+                _remove(pid_file)
+            else:
+                log("[deadman] cancel summary write failed — leaving the pid "
+                    "file in place so status degrades to LOST, not silence")
             summary["exit_code"] = 0
             log(f"[deadman] cancelled during sleep at {summary['ended_at']}")
             return summary
@@ -342,8 +353,17 @@ def run_armed(spec: ArmSpec, *, pid_file: Path, summary_path: Path,
     summary = _base_summary(spec, armed_at_iso, fire_at_iso, pid)
     summary.update(outcome=outcome, stop_status=stop_status, attempts=attempts,
                    ended_at=iso_now(), pod_may_still_be_running=(outcome != "stopped"))
-    _remove(pid_file)
-    _write_summary(summary_path, summary, log)
+    # Fail-safe ordering (applies to BOTH stopped and stop_failed): summary
+    # FIRST, pid file second. If the process dies or the write fails right
+    # here, the pid file remains and a later `status` reads LOST (exit 1,
+    # check manually) — the desired degraded state; remove-then-write would
+    # instead report not_armed or an older success in the exact
+    # pod-may-still-be-billing scenario.
+    if _write_summary(summary_path, summary, log):
+        _remove(pid_file)
+    else:
+        log("[deadman] fire summary write failed — leaving the pid file in "
+            "place so a later status reads LOST (fail-safe), not not_armed")
     summary["exit_code"] = 0 if outcome == "stopped" else 1
     return summary
 
