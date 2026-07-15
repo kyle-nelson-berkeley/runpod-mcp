@@ -121,6 +121,7 @@ def test_cancel_during_sleep_writes_cancelled_summary_and_never_calls_stop(
     assert not spec.pid_file.exists()
     on_disk = json.loads(spec.summary_path.read_text())
     assert on_disk["outcome"] == "cancelled"
+    assert on_disk["exit_code"] == 0   # persisted, not just in-memory
     # never reached the full 3h window — cancel fired early
     assert clock.now() < 3600 * 3
 
@@ -237,6 +238,8 @@ def test_retry_cycles_respect_spacing_and_count(monkeypatch, tmp_path):
     # spacing sleeps: exactly 2 (after cycle 1 and 2), NONE trailing cycle 3
     assert clock.sleeps == [120, 120]
     assert not spec.pid_file.exists()   # removed even on exhaustion
+    on_disk = json.loads(spec.summary_path.read_text())
+    assert on_disk["exit_code"] == 1   # persisted on the stop_failed path too
 
 
 def test_runtime_construction_failure_counts_as_failed_attempt_not_a_crash(
@@ -543,14 +546,16 @@ def test_summary_field_contract_present_in_memory_and_on_disk(monkeypatch, tmp_p
                           now=lambda: 0.0, iso_now=lambda: ISO_T0, log=NOLOG)
 
     required = ("armed_at", "fire_at", "hours", "retries", "spacing_sec",
-               "outcome", "stop_status", "attempts", "ended_at", "pid")
+               "outcome", "stop_status", "attempts", "ended_at", "pid",
+               "exit_code")
     for key in required:
         assert key in summary, key
     on_disk = json.loads(spec.summary_path.read_text())
     for key in required:
-        assert key in on_disk, key
+        assert key in on_disk, key   # exit_code must be PERSISTED, not post-hoc
     assert on_disk["retries"] == 2
     assert on_disk["spacing_sec"] == 7
+    assert on_disk["exit_code"] == 0   # stopped path
 
 
 def test_summary_write_failure_never_masks_the_real_outcome(monkeypatch, tmp_path):

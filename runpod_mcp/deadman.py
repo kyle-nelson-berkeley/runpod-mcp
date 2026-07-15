@@ -283,8 +283,12 @@ def run_armed(spec: ArmSpec, *, pid_file: Path, summary_path: Path,
     while True:
         if cancel_requested():
             summary = _base_summary(spec, armed_at_iso, fire_at_iso, pid)
+            # exit_code is set BEFORE the write so the PERSISTED summary
+            # carries it too (repo convention: supervise persists
+            # process_exit_code in its summary file).
             summary.update(outcome="cancelled", stop_status=None, attempts=[],
-                          ended_at=iso_now(), pod_may_still_be_running=False)
+                          ended_at=iso_now(), pod_may_still_be_running=False,
+                          exit_code=0)
             # Fail-safe ordering: summary FIRST, pid file second. A crash or
             # write failure between the two leaves the pid file in place, so
             # a later `status` reads LOST (exit 1, check manually) — never
@@ -294,7 +298,6 @@ def run_armed(spec: ArmSpec, *, pid_file: Path, summary_path: Path,
             else:
                 log("[deadman] cancel summary write failed — leaving the pid "
                     "file in place so status degrades to LOST, not silence")
-            summary["exit_code"] = 0
             log(f"[deadman] cancelled during sleep at {summary['ended_at']}")
             return summary
         remaining = fire_at_mono - now()
@@ -351,8 +354,11 @@ def run_armed(spec: ArmSpec, *, pid_file: Path, summary_path: Path,
             sleep(spec.spacing_sec)
 
     summary = _base_summary(spec, armed_at_iso, fire_at_iso, pid)
+    # exit_code is set BEFORE the write so the PERSISTED summary carries it
+    # too (repo convention: supervise persists process_exit_code).
     summary.update(outcome=outcome, stop_status=stop_status, attempts=attempts,
-                   ended_at=iso_now(), pod_may_still_be_running=(outcome != "stopped"))
+                   ended_at=iso_now(), pod_may_still_be_running=(outcome != "stopped"),
+                   exit_code=0 if outcome == "stopped" else 1)
     # Fail-safe ordering (applies to BOTH stopped and stop_failed): summary
     # FIRST, pid file second. If the process dies or the write fails right
     # here, the pid file remains and a later `status` reads LOST (exit 1,
@@ -364,7 +370,6 @@ def run_armed(spec: ArmSpec, *, pid_file: Path, summary_path: Path,
     else:
         log("[deadman] fire summary write failed — leaving the pid file in "
             "place so a later status reads LOST (fail-safe), not not_armed")
-    summary["exit_code"] = 0 if outcome == "stopped" else 1
     return summary
 
 
