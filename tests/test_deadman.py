@@ -537,6 +537,85 @@ def test_status_reports_latest_summary_when_no_pidfile(tmp_path):
     assert result["exit_code"] == 0
 
 
+def test_status_after_stop_failed_summary_exits_1_with_warning(tmp_path):
+    """The exhausted-fire path removes the pid file, so a later status lands
+    on the last-summary branch — a stop_failed outcome there MUST exit 1 (the
+    pod may still be running/billing); an exit-0 would silence status-based
+    monitoring in the exact case it exists for."""
+    (tmp_path / "deadman-20260715-000000.json").write_text(
+        json.dumps({"outcome": "stop_failed", "pod_may_still_be_running": True}))
+
+    log_lines = []
+    result = deadman.status(pid_file=tmp_path / "nope.pid",
+                            summary_glob=str(tmp_path / "deadman-*.json"),
+                            log=log_lines.append)
+
+    assert result["state"] == "stop_failed"
+    assert result["exit_code"] == 1
+    assert "may still be running" in result["message"]
+    assert any("may still be running" in line for line in log_lines)
+
+
+def test_status_after_stopped_summary_exits_0(tmp_path):
+    (tmp_path / "deadman-20260715-000000.json").write_text(
+        json.dumps({"outcome": "stopped", "stop_status": "stopped"}))
+
+    result = deadman.status(pid_file=tmp_path / "nope.pid",
+                            summary_glob=str(tmp_path / "deadman-*.json"), log=NOLOG)
+    assert result["state"] == "stopped"
+    assert result["exit_code"] == 0
+
+
+def test_status_ordering_older_stop_failed_newer_stopped_exits_0(tmp_path):
+    """Deterministic 'most recent' selection: default summary filenames embed
+    a zero-padded UTC stamp, so lexicographic sort = chronological — a NEWER
+    stopped supersedes an OLDER stop_failed."""
+    (tmp_path / "deadman-20260714-090000.json").write_text(
+        json.dumps({"outcome": "stop_failed"}))
+    (tmp_path / "deadman-20260715-120000.json").write_text(
+        json.dumps({"outcome": "stopped"}))
+
+    result = deadman.status(pid_file=tmp_path / "nope.pid",
+                            summary_glob=str(tmp_path / "deadman-*.json"), log=NOLOG)
+    assert result["state"] == "stopped"
+    assert result["exit_code"] == 0
+
+
+def test_status_ordering_older_stopped_newer_stop_failed_exits_1(tmp_path):
+    (tmp_path / "deadman-20260714-090000.json").write_text(
+        json.dumps({"outcome": "stopped"}))
+    (tmp_path / "deadman-20260715-120000.json").write_text(
+        json.dumps({"outcome": "stop_failed"}))
+
+    result = deadman.status(pid_file=tmp_path / "nope.pid",
+                            summary_glob=str(tmp_path / "deadman-*.json"), log=NOLOG)
+    assert result["state"] == "stop_failed"
+    assert result["exit_code"] == 1
+
+
+def test_exhausted_fire_then_status_end_to_end_exits_1(monkeypatch, tmp_path):
+    """The exact monitoring scenario from the review finding, end to end: a
+    fuse exhausts its retries (pid file removed, stop_failed summary written)
+    -> a later `status` over the same paths must exit 1, never 0."""
+    def stop_pod(rt, force=False):
+        raise tools.ToolError("API unreachable")
+    monkeypatch.setattr(deadman.tools, "stop_pod", stop_pod)
+
+    pid_file = tmp_path / "deadman.pid"
+    summary_path = tmp_path / "deadman-20260715-000000.json"
+    spec = _spec(tmp_path, retries=2, spacing_sec=0, pid_file=pid_file,
+                summary_path=summary_path)
+    fired = deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                        now=lambda: 0.0, iso_now=lambda: ISO_T0, log=NOLOG)
+    assert fired["outcome"] == "stop_failed"
+    assert not pid_file.exists()
+
+    result = deadman.status(pid_file=pid_file,
+                            summary_glob=str(tmp_path / "deadman-*.json"), log=NOLOG)
+    assert result["state"] == "stop_failed"
+    assert result["exit_code"] == 1
+
+
 # ========================================================= 11. CLI / argparse
 
 @pytest.mark.parametrize("bad", ["0", "-1"])

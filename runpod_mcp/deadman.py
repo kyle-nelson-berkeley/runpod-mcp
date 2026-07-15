@@ -381,6 +381,11 @@ def cancel(*, pid_file: Path | None = None, log=_default_log) -> dict:
 # ------------------------------------------------------------------- status
 
 def _find_latest_summary(glob_pattern: str) -> dict | None:
+    """Most recent = lexicographically LAST filename. Deterministic because
+    default summary names embed a zero-padded UTC stamp
+    (deadman-YYYYMMDD-HHMMSS.json), which sorts chronologically; explicit
+    --summary-path files live outside the default glob and are the
+    operator's own bookkeeping."""
     paths = sorted(glob.glob(glob_pattern))
     if not paths:
         return None
@@ -407,7 +412,13 @@ def status(*, pid_file: Path | None = None, summary_glob: str | None = None,
     LOST (pid file exists but the process is dead/mismatched — the pod may
     still be running, exit 1 so scripts can alert) | last summary's outcome |
     not_armed (nothing on disk). A LOST fuse must never report as armed —
-    that false comfort is exactly the failure mode this tool exists to kill."""
+    that false comfort is exactly the failure mode this tool exists to kill.
+
+    Exit-code contract: 0 = armed / stopped / cancelled / not_armed;
+    1 = LOST or stop_failed (both mean the pod may still be running —
+    status-based monitoring must be able to alert on them); 2 = usage errors
+    (argparse). A stop_failed summary silently exiting 0 would defeat the
+    monitoring in the exact case that matters."""
     pid_file = pid_file or _default_pid_file()
     if pid_file.exists():
         data = _read_pid_file(pid_file)
@@ -427,8 +438,15 @@ def status(*, pid_file: Path | None = None, summary_glob: str | None = None,
     if summary is None:
         return {"state": "not_armed", "message": "no pid file, no prior summary",
                 "exit_code": 0}
-    return {"state": summary.get("outcome", "unknown"), "summary": summary,
-            "exit_code": 0}
+    outcome = summary.get("outcome", "unknown")
+    if outcome == "stop_failed":
+        log("[deadman] status: last fuse EXHAUSTED its stop retries — the pod "
+           "may still be running/billing; check/stop it manually")
+        return {"state": "stop_failed", "summary": summary,
+                "message": "last fuse exhausted its stop retries; the pod may "
+                           "still be running — check/stop it manually",
+                "exit_code": 1}
+    return {"state": outcome, "summary": summary, "exit_code": 0}
 
 
 # --------------------------------------------------------------------- CLI
