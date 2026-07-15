@@ -337,6 +337,78 @@ def test_pid_cmdline_never_raises_on_ps_failure(monkeypatch):
     assert deadman._pid_cmdline(4242, run=fake_run) == ""
 
 
+# ------------------------------------------------ 6b. corrupt pid files
+
+CORRUPT_PID_CONTENTS = [
+    pytest.param(json.dumps({"pid": "not-a-number", "fire_at": ISO_T0}),
+                 id="non-int-pid"),
+    pytest.param("{{{ this is not json", id="malformed-json"),
+]
+
+
+def test_pid_alive_is_defensive_against_non_int_input():
+    """os.kill(non-int, 0) raises TypeError/ValueError — _pid_alive must
+    swallow those and answer False, never crash (a corrupt pid file must not
+    brick arm/cancel/status until manually removed)."""
+    assert deadman._pid_alive("not-a-number") is False
+    assert deadman._pid_alive(None) is False
+
+
+@pytest.mark.parametrize("content", CORRUPT_PID_CONTENTS)
+def test_read_pid_file_normalizes_corrupt_pid_to_none(tmp_path, content):
+    pid_file = tmp_path / "deadman.pid"
+    pid_file.write_text(content)
+    assert deadman._read_pid_file(pid_file).get("pid") is None
+
+
+@pytest.mark.parametrize("content", CORRUPT_PID_CONTENTS)
+def test_corrupt_pid_file_arm_reaps_loudly_and_proceeds(monkeypatch, tmp_path, content):
+    """Uses the REAL _is_deadman_process/_pid_alive path — proves no
+    TypeError escapes on a corrupt pid file; the file is stale, reaped, and
+    the arm proceeds."""
+    pid_file = tmp_path / "deadman.pid"
+    pid_file.write_text(content)
+    _always_stopped(monkeypatch)
+
+    log_lines = []
+    spec = _spec(tmp_path, pid_file=pid_file)
+    summary = deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                          now=lambda: 0.0, iso_now=lambda: ISO_T0, log=log_lines.append)
+
+    assert summary["outcome"] == "stopped"
+    assert any("reaping stale pid file" in line for line in log_lines)
+    assert not pid_file.exists()   # consumed by the successful run
+
+
+@pytest.mark.parametrize("content", CORRUPT_PID_CONTENTS)
+def test_corrupt_pid_file_cancel_is_stale_noop_never_signals(monkeypatch, tmp_path, content):
+    pid_file = tmp_path / "deadman.pid"
+    pid_file.write_text(content)
+    killed = []
+    monkeypatch.setattr(deadman.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    result = deadman.cancel(pid_file=pid_file, log=NOLOG)
+
+    assert killed == []
+    assert not pid_file.exists()   # reaped
+    assert result["outcome"] == "not_armed"
+    assert result["exit_code"] == 0
+
+
+@pytest.mark.parametrize("content", CORRUPT_PID_CONTENTS)
+def test_corrupt_pid_file_status_reads_lost_exit_1(tmp_path, content):
+    """We cannot prove the fuse is alive from a corrupt pid file, so status
+    must alert (LOST, exit 1) — never crash, never report armed."""
+    pid_file = tmp_path / "deadman.pid"
+    pid_file.write_text(content)
+
+    result = deadman.status(pid_file=pid_file, log=NOLOG)
+
+    assert result["state"] == "LOST"
+    assert result["exit_code"] == 1
+    assert "may still be running" in result["message"]
+
+
 # ============================================================= 7. key probe
 
 def test_key_probe_failure_refuses_arm_and_removes_pid_file(monkeypatch, tmp_path):
@@ -384,6 +456,82 @@ def test_no_probe_key_skips_the_keychain_entirely(monkeypatch, tmp_path):
                           now=lambda: 0.0, iso_now=lambda: ISO_T0, log=NOLOG)
     assert called["n"] == 0
     assert summary["outcome"] == "stopped"
+
+
+def test_key_probe_refusal_writes_durable_refused_summary_status_reports_it(
+        monkeypatch, tmp_path):
+    """The refusal must survive the (possibly lost) stdout of a backgrounded
+    arm: a durable summary with outcome 'refused' is written, and a later
+    status reports the reason with exit 0 (a refused arm never touched the
+    pod) — not plain not_armed."""
+    def boom():
+        raise config.ConfigError("Keychain lookup failed (rc=44) for rpa_SECRET999")
+    monkeypatch.setattr(deadman.config, "fetch_api_key", boom)
+
+    pid_file = tmp_path / "deadman.pid"
+    summary_path = tmp_path / "deadman-20260715-000000.json"
+    spec = _spec(tmp_path, pid_file=pid_file, summary_path=summary_path,
+                probe_key=True)
+    with pytest.raises(deadman.ArmRefused):
+        deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                   now=lambda: 0.0, iso_now=lambda: ISO_T0, log=NOLOG)
+
+    assert not pid_file.exists()
+    on_disk = json.loads(summary_path.read_text())
+    assert on_disk["outcome"] == "refused"
+    assert on_disk["exit_code"] == 2
+    assert "Keychain key probe failed" in on_disk["reason"]
+    assert "rpa_SECRET999" not in summary_path.read_text()   # scrubbed
+
+    result = deadman.status(pid_file=pid_file,
+                            summary_glob=str(tmp_path / "deadman-*.json"), log=NOLOG)
+    assert result["state"] == "refused"
+    assert result["exit_code"] == 0
+    assert "Keychain key probe failed" in result["reason"]
+
+
+def test_key_probe_refusal_writes_default_stamped_summary(monkeypatch, tmp_path):
+    """Without an explicit --summary-path the refusal summary must land at
+    the default-stamped deadman-<stamp>.json under REPO_ROOT/logs/pod — the
+    path status's default glob actually searches."""
+    monkeypatch.setattr(deadman.config, "REPO_ROOT", tmp_path)
+
+    def boom():
+        raise config.ConfigError("Keychain lookup failed")
+    monkeypatch.setattr(deadman.config, "fetch_api_key", boom)
+
+    spec = deadman.ArmSpec(hours=3.0, retries=5, spacing_sec=300, probe_key=True)
+    with pytest.raises(deadman.ArmRefused):
+        deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                   now=lambda: 0.0, iso_now=lambda: "2026-07-15T12:00:00+00:00",
+                   log=NOLOG)
+
+    expected = tmp_path / "logs" / "pod" / "deadman-20260715-120000.json"
+    assert expected.exists()
+    assert json.loads(expected.read_text())["outcome"] == "refused"
+
+    result = deadman.status(log=NOLOG)   # default pid file + default glob
+    assert result["state"] == "refused"
+    assert result["exit_code"] == 0
+
+
+def test_refusal_summary_write_failure_never_masks_the_refusal(monkeypatch, tmp_path):
+    """Same never-crash-on-the-way-out discipline as every other summary
+    write: if the refusal summary can't be written, arm still refuses with
+    ArmRefused (exit 2) — the write failure is logged, not raised."""
+    def boom():
+        raise config.ConfigError("Keychain lookup failed")
+    monkeypatch.setattr(deadman.config, "fetch_api_key", boom)
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    spec = _spec(tmp_path, summary_path=blocker / "s.json", probe_key=True)
+
+    log_lines = []
+    with pytest.raises(deadman.ArmRefused, match="Keychain key probe failed"):
+        deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                   now=lambda: 0.0, iso_now=lambda: ISO_T0, log=log_lines.append)
+    assert any("failed to write summary" in line for line in log_lines)
 
 
 # ============================================================= 8. summary

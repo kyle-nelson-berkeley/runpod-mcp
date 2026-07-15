@@ -96,9 +96,11 @@ class ArmSpec:
 
 # --------------------------------------------------------------- pid liveness
 
-def _pid_alive(pid: int) -> bool:
+def _pid_alive(pid) -> bool:
     try:
         os.kill(pid, 0)
+    except (TypeError, ValueError):
+        return False   # non-int pid (corrupt pid file) — provably not alive
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -129,10 +131,21 @@ def _is_deadman_process(pid: int | None) -> bool:
 
 
 def _read_pid_file(pid_file: Path) -> dict:
+    """Defensive parse: malformed JSON, a non-dict payload, or a non-integer
+    `pid` value must never crash arm/cancel/status — a corrupt pid file is
+    STALE (pid normalized to None -> _is_deadman_process False -> arm/cancel
+    reap it, status reports LOST), never fatal."""
     try:
-        return json.loads(pid_file.read_text())
+        data = json.loads(pid_file.read_text())
     except Exception:   # noqa: BLE001 — a corrupt pid file is stale, not fatal
         return {}
+    if not isinstance(data, dict):
+        return {}
+    try:
+        data["pid"] = int(data.get("pid"))
+    except (TypeError, ValueError):
+        data["pid"] = None
+    return data
 
 
 def _remove(path: Path) -> None:
@@ -192,6 +205,28 @@ def _write_summary(summary_path: Path, summary: dict, log) -> None:
            f"{config.scrub(str(exc))} — outcome was {summary.get('outcome')!r}, "
            f"stop_status={summary.get('stop_status')!r} (NOT lost, just not "
            "persisted to this path)")
+
+
+def _write_refusal_summary(spec: ArmSpec, summary_path: Path, armed_at_iso: str,
+                           fire_at_iso: str, pid: int, reason: str, iso_now,
+                           log) -> None:
+    """Durable record of a post-pid-file-creation refusal (e.g. the key-probe
+    failure): without it, a later `status` would report plain not_armed and
+    the refusal reason would exist only in the (possibly lost) stdout of the
+    backgrounded arm. `reason` must arrive already scrubbed. Same
+    never-crash-on-the-way-out discipline as every other summary write.
+
+    Deliberately NOT called for pre-create refusals (another live deadman
+    holds the pid file, or the O_EXCL TOCTOU race): there the OTHER fuse's
+    pid file is the authoritative state, and a stamped refusal file written
+    now would sort lexicographically AFTER that fuse's own summary (named by
+    its earlier armed_at), masking its eventual stopped/stop_failed outcome
+    from `status` — the exact false comfort this tool exists to kill."""
+    summary = _base_summary(spec, armed_at_iso, fire_at_iso, pid)
+    summary.update(outcome="refused", reason=reason, stop_status=None,
+                   attempts=[], ended_at=iso_now(),
+                   pod_may_still_be_running=False, exit_code=2)
+    _write_summary(summary_path, summary, log)
 
 
 # ------------------------------------------------------------- pid-file prep
@@ -339,10 +374,14 @@ def arm(spec: ArmSpec, *, rt_factory, sleep=time.sleep, now=time.monotonic,
             config.fetch_api_key()   # fetch-and-DISCARD — never stored, never logged
         except Exception as exc:   # noqa: BLE001 — any probe failure refuses arm
             _remove(pid_file)
-            raise ArmRefused(
-                f"Keychain key probe failed: {config.scrub(str(exc))} — "
-                "refusing to arm (fix the Keychain entry, or pass "
-                "--no-probe-key for offline testing)") from None
+            reason = (f"Keychain key probe failed: {config.scrub(str(exc))} — "
+                      "refusing to arm (fix the Keychain entry, or pass "
+                      "--no-probe-key for offline testing)")
+            # Durable refusal record — the backgrounded arm's stdout may be
+            # lost, and status must be able to surface WHY the fuse never armed.
+            _write_refusal_summary(spec, summary_path, armed_at_iso, fire_at_iso,
+                                   pid, reason, iso_now, log)
+            raise ArmRefused(reason) from None
 
     log(f"[deadman] armed pid={pid} armed_at={armed_at_iso} fire_at={fire_at_iso} "
        f"(hours={spec.hours}, retries={spec.retries}, spacing_sec={spec.spacing_sec})")
@@ -414,11 +453,13 @@ def status(*, pid_file: Path | None = None, summary_glob: str | None = None,
     not_armed (nothing on disk). A LOST fuse must never report as armed —
     that false comfort is exactly the failure mode this tool exists to kill.
 
-    Exit-code contract: 0 = armed / stopped / cancelled / not_armed;
+    Exit-code contract: 0 = armed / stopped / cancelled / refused / not_armed
+    (a refused arm never touched the pod, but its reason is surfaced);
     1 = LOST or stop_failed (both mean the pod may still be running —
     status-based monitoring must be able to alert on them); 2 = usage errors
     (argparse). A stop_failed summary silently exiting 0 would defeat the
-    monitoring in the exact case that matters."""
+    monitoring in the exact case that matters. A malformed pid file (bad
+    JSON / non-int pid) reads as LOST — we cannot prove the fuse is alive."""
     pid_file = pid_file or _default_pid_file()
     if pid_file.exists():
         data = _read_pid_file(pid_file)
@@ -446,6 +487,11 @@ def status(*, pid_file: Path | None = None, summary_glob: str | None = None,
                 "message": "last fuse exhausted its stop retries; the pod may "
                            "still be running — check/stop it manually",
                 "exit_code": 1}
+    if outcome == "refused":
+        # A refused arm never touched the pod, so exit 0 (not a pod-may-be-
+        # billing state) — but the reason must surface, not read as not_armed.
+        return {"state": "refused", "reason": summary.get("reason"),
+                "summary": summary, "exit_code": 0}
     return {"state": outcome, "summary": summary, "exit_code": 0}
 
 
