@@ -567,7 +567,7 @@ def test_default_summary_path_and_max_wait_derivation_job_mode(monkeypatch, tmp_
 
 @pytest.mark.parametrize("err", [
     tools.ToolError("unknown vehicle 'bogus' — use curee|bluerov2"),
-    training.TrainingError("unknown dr_level 'bogus' — use DR_0/DR_1/DR_2"),
+    training.TrainingError("unknown dr_level 'bogus' — use DR_0..DR_4"),
 ])
 def test_dry_run_refusal_no_poll_no_stop(monkeypatch, tmp_path, err):
     calls = []

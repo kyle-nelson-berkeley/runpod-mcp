@@ -533,7 +533,7 @@ def launch_training(rt: Runtime, vehicle: str, dr_level: str, seed: int = 1,
         raise ToolError(f"unknown vehicle {vehicle!r} — use curee|bluerov2")
     level = training.canonical_level(dr_level)
     command = training.build_train_command(seed=seed, extra_args=extra_args)
-    values = training.DR_TABLES[vehicle][level]
+    values = training.table_entry(vehicle, level)
     ceiling = _ceiling(rt, "training_sec")
 
     if dry_run:

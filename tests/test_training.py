@@ -35,7 +35,7 @@ def test_bluerov2_table_matches_config_yaml():
 def test_curee_table_matches_runbook_table():
     runbook = (REPO_ROOT / "runbook" / "RUNBOOK.md").read_text()
     rows = {}
-    for level in ["DR_0", "DR_1", "DR_2"]:
+    for level in ["DR_0", "DR_1", "DR_2", "DR_3", "DR_4"]:
         m = re.search(rf"\| {level} [^|]*\| `([^`]+)` \| `(\[[^`]+\])`", runbook)
         assert m, f"RUNBOOK.md CUREE DR table row for {level} not found"
         rows[level] = m.groups()
@@ -62,6 +62,8 @@ def test_level_aliases():
         assert training.canonical_level(alias) == "DR_1"
     assert training.canonical_level("none") == "DR_0"
     assert training.canonical_level("large") == "DR_2"
+    assert training.canonical_level("3") == "DR_3"
+    assert training.canonical_level("dr_4") == "DR_4"
     with pytest.raises(training.TrainingError, match="dr_level"):
         training.canonical_level("huge")
 
@@ -123,6 +125,41 @@ def test_apply_dr_unrecognized_current_value_aborts():
 def test_apply_dr_missing_anchor_aborts():
     with pytest.raises(training.TrainingError, match="anchor"):
         training.apply_dr_to_source("nothing here", "curee", "DR_0")
+
+
+# --------------------------------------- 009 extension levels (DR_3 / DR_4)
+
+def test_dr3_dr4_float_math_sanity():
+    nominal = 0.022747843530591776
+    for level, radius, delta in [("DR_3", 0.075, 0.0045), ("DR_4", 0.1, 0.006)]:
+        entry = training.DR_TABLES["curee"][level]
+        assert float(entry["com_to_cob_offset_radius"]) == radius
+        lo, hi = (float(x) for x in entry["volume_range"].strip("[]").split(","))
+        assert lo == nominal - delta
+        assert hi == nominal + delta
+
+
+def test_apply_dr3_then_dr4_roundtrip():
+    dr3 = training.apply_dr_to_source(FIXTURE, "curee", "DR_3")
+    assert "com_to_cob_offset_radius = 0.075 # uniform from sphere" in dr3
+    assert ("volume_range = [0.018247843530591775, 0.027247843530591776] # "
+            "uniform" in dr3)
+    # commented-out No-DR preset line stays untouched
+    assert "# com_to_cob_offset_radius = 0 #" in dr3
+    # mass_range untouched
+    assert "mass_range = [2.2701e+01,2.2701e+01]" in dr3
+
+    dr4 = training.apply_dr_to_source(dr3, "curee", "DR_4")   # roundtrip: DR_3-current -> DR_4
+    assert "com_to_cob_offset_radius = 0.1 #" in dr4
+    assert "volume_range = [0.016747843530591777, 0.028747843530591774] #" in dr4
+
+
+def test_table_entry_unknown_vehicle_level_combo_refuses_cleanly():
+    with pytest.raises(training.TrainingError, match="not defined for vehicle 'bluerov2'"):
+        training.table_entry("bluerov2", "DR_3")
+    with pytest.raises(training.TrainingError, match="not defined"):
+        training.apply_dr_to_source(FIXTURE, "bluerov2", "dr_4")
+    assert training.table_entry("curee", "3") == training.DR_TABLES["curee"]["DR_3"]
 
 
 # ----------------------------------------------------------------- markers

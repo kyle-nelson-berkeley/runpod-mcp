@@ -348,6 +348,14 @@ def test_launch_training_dry_run_needs_no_pod():
     assert "gates" in out
 
 
+def test_launch_training_dry_run_bluerov2_missing_level_refuses_cleanly():
+    # DR_3/DR_4 are CUREE-only extensions (campaign 009) — bluerov2 must
+    # refuse via TrainingError, never a raw KeyError, and still touch no pod.
+    with pytest.raises(training.TrainingError, match="not defined"):
+        tools.launch_training(make_rt(), vehicle="bluerov2", dr_level="DR_3",
+                              dry_run=True)
+
+
 def _training_rt(markers: str, live="LIVE_LIST_END\n"):
     """markers: output of the marker-probe call (PATCH=.../SANITY=...)."""
     fixture = (REPO_ROOT / "runpod-mcp" / "tests" / "fixtures" /
