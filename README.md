@@ -18,8 +18,10 @@ here with cost guardrails in code.
                                             jobs.py       detached jobs: /workspace/jobs/<id>/{cmd.sh,pid,out.log,exit_code,meta.json}
                                             training.py   DR tables (RUNBOOK/yaml-cross-checked) + verbatim train cmd
                                             supervise.py  Mac-side background CLI: launch→poll→pull→sync→spend→stop (reuses tools.*)
+                                            watch.py      Mac-side ADVISORY observation CLI: discover job→tail out.log→parse metrics→page on plateau/failure/stall (read-only; never stops pods)
                                             remote/       job_wrapper.sh · idle_watchdog.sh · apply_bluerov2_patch.py
 supervise.sh → caffeinate -i wrapper around  python -m runpod_mcp.supervise
+watch.sh     → caffeinate -i wrapper around  python -m runpod_mcp.watch   (live-pod behavior UNVERIFIED — fixture/mock-verified only; see CLAUDE.md §D)
 ```
 
 - **Stateless**: "the pod" = whatever `GET /pods` returns named

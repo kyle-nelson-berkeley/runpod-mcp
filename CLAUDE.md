@@ -86,3 +86,45 @@ zero logic duplication.
 - `--sync-subdir` is REQUIRED in `--job-name` mode (pass `none` to skip the
   analysis sync — the job-dir pull still happens regardless); `--training`
   defaults it to `rsl_rl/warpauv_direct`.
+
+### The `watch` CLI — advisory observation loop (also NOT a 15th tool)
+
+`python -m runpod_mcp.watch` (wrapper: `watch.sh`) is the mid-run companion to
+`supervise`: armed as a **second** `run_in_background` Bash task alongside the
+supervise task, it discovers the single active job (poll `pod_status`
+`active_jobs` under a bounded `--startup-grace`, default 180 s; `--job-id`
+skips discovery for attended use), tails the job's `out.log` incrementally by
+byte offset (`tail -c +OFFSET`, `--interval` default 60 s), parses the rsl_rl
+console blocks into a full metric series (iteration/total, mean reward,
+value/surrogate/entropy losses — extending the `latest_reward_line` idea in
+`jobs.status`), snapshots a LISTING of the job dir (names/sizes/mtimes — never
+downloads weights), prints one compact status line per interval, and maintains
+a JSON status file (`--status-path`, default `logs/pod/watch-<job_id>.json`).
+
+- **The exit IS the page** (same idiom as `supervise.sh`), with distinct
+  codes: **0** job completed OK · **3** plateau detected (exits at DETECTION
+  time, while the job still runs — the whole point is paging early enough to
+  intervene) · **4** failure evidence (traceback / CUDA OOM patterns, or
+  pod-side `exit_code` ≠ 0) · **5** stall / lost contact (only after
+  `--stall-sec` with NO terminal evidence) · **2** usage errors.
+- **Strictly read-only, strictly advisory.** The watcher only ever runs
+  `tail`/`ls`/`cat`-class commands on the pod; it can NOT stop or terminate
+  anything (stop stays owned by supervise / deadman / humans, and
+  `terminate_pod` stays human-approval-only). Its pages — including plateau —
+  trigger no automated action. **`supervise`'s durable summary JSON remains
+  the AUTHORITATIVE terminal record**; the watcher's status file is advisory.
+- **Ordered exit decision tree** (avoids false-paging normal completion:
+  supervise stops the pod right after the job ends, so a 60 s tail often
+  catches the pod already gone on the happy path): before concluding
+  stall/lost-contact it (a) attempts to read the pod-side
+  `/workspace/jobs/<job_id>/exit_code` artifact (the same file `jobs.status`
+  reads) and (b) checks the job's disappearance from `active_jobs`. "Gone +
+  exit_code present" exits **0 or 4 by that code, never 5**; exit 5 is
+  reserved for genuinely-unreachable-with-no-terminal-evidence.
+- **HONESTY NOTE (unverified live):** the watcher's live-pod behavior is
+  **UNVERIFIED** — it was built and verified entirely offline against
+  captured job logs and mocked SSH (the GPU envelope was SPENT; zero pod
+  launches). The `--plateau-window` / `--plateau-min-delta` / `--stall-sec`
+  defaults are **heuristics derived from (and tested against) the same
+  captured fixtures** — a circularity we state rather than paper over.
+  Treat the first live run as the real acceptance test.
