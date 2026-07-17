@@ -1,0 +1,14 @@
+Synthetic fixture — a Python traceback as it appears mid-stream in out.log
+(format matches the uncaught-exception style rsl_rl/IsaacLab crashes with;
+values below are synthetic, not from a real job).
+
+Traceback (most recent call last):
+  File "/workspace/IsaacLab/scripts/reinforcement_learning/rsl_rl/train.py", line 210, in <module>
+    main()
+  File "/workspace/IsaacLab/scripts/reinforcement_learning/rsl_rl/train.py", line 188, in main
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations)
+  File "/workspace/IsaacLab/_isaac_sim/exts/rsl_rl/runners/on_policy_runner.py", line 142, in learn
+    obs, rewards, dones, infos = self.env.step(actions)
+  File "/workspace/isaac-auv-env/warpauv_env.py", line 412, in step
+    self._physics_step()
+RuntimeError: an illegal memory access was encountered

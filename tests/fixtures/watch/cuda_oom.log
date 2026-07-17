@@ -1,0 +1,11 @@
+Synthetic fixture — a CUDA out-of-memory failure as it appears mid-stream in
+out.log (format matches torch's OOM error text; values below are synthetic).
+
+Traceback (most recent call last):
+  File "/workspace/IsaacLab/scripts/reinforcement_learning/rsl_rl/train.py", line 210, in <module>
+    main()
+  File "/workspace/IsaacLab/_isaac_sim/exts/rsl_rl/algorithms/ppo.py", line 96, in update
+    loss.backward()
+  File "/workspace/IsaacLab/_isaac_sim/kit/python/lib/python3.10/site-packages/torch/_tensor.py", line 522, in backward
+    torch.autograd.backward(self, gradient, retain_graph, create_graph, inputs=inputs)
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.24 GiB (GPU 0; 23.65 GiB total capacity; 21.90 GiB already allocated; 612.12 MiB free; 22.41 GiB reserved in total by PyTorch)
