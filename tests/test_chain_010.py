@@ -710,6 +710,44 @@ def test_rollouts_refuses_bad_arm_seed_set(harness):
     assert stop_count(harness.calls_log) == 0
 
 
+@pytest.mark.parametrize("evil_suffix", [";touch {marker}", "$(touch {marker})"])
+def test_rollouts_refuses_metachar_run_dir(harness, evil_suffix):
+    """Codex finding 1: a TSV run_dir carrying shell metacharacters must be
+    REFUSED at validation (rc 3, pre-spend, no stop) — never interpolated
+    into the pod-side command. The local checkpoint fixture is created under
+    the literal metachar dir name so the quoted `test -f` check alone would
+    pass; only the anchored run-dir shape guard can refuse this row."""
+    rows = _valid_12_rows(harness)
+    marker = harness.tmp_path / "pwned"
+    evil_dir = "2001-01-04_00-00-00" + evil_suffix.format(marker=marker)
+    harness.touch_checkpoint(evil_dir, "model_1499.pt")
+    row = list(rows[3])   # arm A seed 1
+    row[3] = evil_dir
+    rows[3] = tuple(row)
+    tsv = harness.write_tsv(rows)
+    proc = harness.run("rollouts", str(tsv))
+    assert proc.returncode == 3
+    assert parse_calls(harness.calls_log) == []
+    assert stop_count(harness.calls_log) == 0
+    assert not marker.exists()   # the injected command demonstrably never ran
+
+
+def test_rollouts_refuses_swapped_baseline_dirs(harness):
+    """Codex finding 2: each BASELINE seed must bind to ITS exact 009 dir.
+    A seed1<->seed2 dir swap passes a membership-only check (both dirs are
+    known, both checkpoints exist) but silently mislabels the baseline
+    rollout CSVs — it must be refused (rc 3, no supervise call, no stop)."""
+    rows = _valid_12_rows(harness)
+    r0, r1 = list(rows[0]), list(rows[1])   # BASELINE seed 1 / seed 2
+    r0[3], r1[3] = r1[3], r0[3]
+    rows[0], rows[1] = tuple(r0), tuple(r1)
+    tsv = harness.write_tsv(rows)
+    proc = harness.run("rollouts", str(tsv))
+    assert proc.returncode == 3
+    assert parse_calls(harness.calls_log) == []
+    assert stop_count(harness.calls_log) == 0
+
+
 def test_rollouts_refuses_missing_local_checkpoint(harness):
     rows = _valid_12_rows(harness)
     # the last row's checkpoint file: remove it after _valid_12_rows touched it

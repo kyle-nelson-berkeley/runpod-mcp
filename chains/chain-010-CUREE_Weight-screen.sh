@@ -650,19 +650,33 @@ phase_rollouts() {
     done
   done
 
-  local want_weights
+  local want_weights want_dir
   for i in 0 1 2 3 4 5 6 7 8 9 10 11; do
     arm="${R_ARM[$i]}"
+    # Run-dir SHAPE guard (refuse-don't-sanitize): run_dir is later
+    # interpolated into a pod-side shell command, so anything outside the
+    # exact run-dir timestamp shape (a hand-edited/salvage row carrying
+    # shell metacharacters, a path, a glob) is refused OUTRIGHT pre-spend —
+    # never quoted-through. A bash case glob is implicitly anchored to the
+    # whole word (bash-3.2 safe; no =~).
+    case "${R_DIR[$i]}" in
+      20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+      *) log "mapping row $((i + 1)): run_dir '${R_DIR[$i]}' does not match the run-dir timestamp shape (YYYY-MM-DD_hh-mm-ss) — refuse"; exit 3 ;;
+    esac
     want_weights=$(weights_for "$arm") || { log "mapping row $((i + 1)): unknown arm '$arm' — refuse"; exit 3; }
     if [ "${R_WEIGHTS[$i]}" != "$want_weights" ]; then
       log "mapping row $((i + 1)) ($arm seed ${R_SEED[$i]}): weights '${R_WEIGHTS[$i]}' != expected '$want_weights' — refuse"
       exit 3
     fi
     if [ "$arm" = "BASELINE" ]; then
-      case " $BASELINE_DIR_1 $BASELINE_DIR_2 $BASELINE_DIR_3 " in
-        *" ${R_DIR[$i]} "*) : ;;
-        *) log "mapping row $((i + 1)): BASELINE run_dir '${R_DIR[$i]}' is not one of the known 009 dirs — refuse"; exit 3 ;;
-      esac
+      # Seed binds to ITS exact 009 dir — membership in the known-dir set is
+      # NOT enough (a seed1<->seed2 swap would pass membership and silently
+      # mislabel the baseline rollout CSVs, corrupting the paired comparison).
+      want_dir=$(baseline_dir_for "${R_SEED[$i]}") || { log "mapping row $((i + 1)): BASELINE seed '${R_SEED[$i]}' has no known 009 dir — refuse"; exit 3; }
+      if [ "${R_DIR[$i]}" != "$want_dir" ]; then
+        log "mapping row $((i + 1)): BASELINE seed ${R_SEED[$i]} run_dir '${R_DIR[$i]}' != its exact 009 dir '$want_dir' — refuse"
+        exit 3
+      fi
       if [ "${R_CKPT[$i]}" != "model_1500.pt" ]; then
         log "mapping row $((i + 1)): BASELINE checkpoint must be model_1500.pt, got '${R_CKPT[$i]}' — refuse"
         exit 3
