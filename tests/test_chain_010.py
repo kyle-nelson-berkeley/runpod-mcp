@@ -512,18 +512,32 @@ def test_bash_syntax_clean():
 
 
 def test_shellcheck_best_effort(tmp_path):
+    """Best-effort means this test may SKIP but must never ERROR: an offline
+    or slow-PyPI environment surfaces as TimeoutExpired/OSError, which must
+    take the skip path. Only a real lint finding (rc != 0 from an installed
+    shellcheck) is a failure."""
     sc_venv = tmp_path / "sc-venv"
-    proc = subprocess.run([sys.executable, "-m", "venv", str(sc_venv)],
-                          capture_output=True, text=True)
+    try:
+        proc = subprocess.run([sys.executable, "-m", "venv", str(sc_venv)],
+                              capture_output=True, text=True, timeout=120)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        pytest.skip(f"could not create scratch venv for shellcheck: {exc}")
     if proc.returncode != 0:
         pytest.skip(f"could not create scratch venv for shellcheck: {proc.stderr}")
     pip = sc_venv / "bin" / "pip"
-    install = subprocess.run([str(pip), "install", "-q", "shellcheck-py"],
-                             capture_output=True, text=True, timeout=60)
+    try:
+        install = subprocess.run([str(pip), "install", "-q", "shellcheck-py"],
+                                 capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        pytest.skip(f"shellcheck-py install timed out/errored (offline?): {exc}")
     if install.returncode != 0:
         pytest.skip(f"shellcheck-py install failed (offline?): {install.stderr[-500:]}")
     sc = sc_venv / "bin" / "shellcheck"
-    result = subprocess.run([str(sc), str(REAL_CHAIN)], capture_output=True, text=True)
+    try:
+        result = subprocess.run([str(sc), str(REAL_CHAIN)],
+                                capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        pytest.skip(f"shellcheck invocation timed out/errored: {exc}")
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -670,6 +684,59 @@ def test_train_spend_guard_breach_aborts(harness):
     assert "SPEND GUARD BREACH" in (proc.stdout + proc.stderr)
 
 
+# ============================================== 7b. run_link retry doctrine
+
+def test_train_prelaunch_failure_retries_once_then_aborts(harness):
+    """run_link's ONE sanctioned retry: supervise fails WITHOUT a job_id in
+    its summary (a pre-launch failure) -> exactly one retry (two supervise
+    invocations for that link — the PATH-stubbed `sleep` makes the 60s wait
+    instant); when the retry also fails, abort + stop. Knobs are global, so
+    the probe (the first link) is where it trips — nothing runs after."""
+    harness.seed_baseline()
+    proc = harness.run("train", env={
+        "STUB_SUPERVISE_RC": "1",
+        "STUB_NO_JOBID": "1",
+    })
+    assert proc.returncode != 0
+    out = proc.stdout + proc.stderr
+    assert "RETRY" in out                       # the pre-launch retry fired
+    calls = [call_dict(a) for a in parse_calls(harness.calls_log)]
+    assert len(calls) == 2                      # probe: attempt 1 + retry, then abort
+    assert all(c.get("training") for c in calls)
+    assert "supervise exited non-zero" in out
+    assert stop_count(harness.calls_log) >= 1
+
+
+def test_train_failure_with_jobid_does_not_retry(harness):
+    """The paired case (the double-launch/double-spend guard): supervise
+    fails but its summary DOES carry a job_id -> NO retry (exactly one
+    invocation), then abort + stop."""
+    harness.seed_baseline()
+    proc = harness.run("train", env={"STUB_SUPERVISE_RC": "1"})
+    assert proc.returncode != 0
+    out = proc.stdout + proc.stderr
+    assert "RETRY" not in out
+    calls = [call_dict(a) for a in parse_calls(harness.calls_log)]
+    assert len(calls) == 1
+    assert "supervise exited non-zero" in out
+    assert stop_count(harness.calls_log) >= 1
+
+
+# ================================================== 7c. checkpoint-missing guard
+
+def test_train_missing_checkpoint_aborts(harness):
+    """STUB_NO_CKPT (global): the 5-iter probe is exempt from the
+    model_1499.pt check by design and passes all its guards, so the first
+    1500-iter link (arm A seed 1) hits the checkpoint-missing abort + stop."""
+    harness.seed_baseline()
+    proc = harness.run("train", env={"STUB_NO_CKPT": "1"})
+    assert proc.returncode != 0
+    out = proc.stdout + proc.stderr
+    assert "model_1499.pt missing" in out
+    assert len(parse_calls(harness.calls_log)) == 2   # probe (green) + failing link 1
+    assert stop_count(harness.calls_log) >= 1
+
+
 # ======================================================= 8. rollouts refusal matrix
 
 def _valid_12_rows(harness):
@@ -786,6 +853,21 @@ def test_rollouts_happy_path(harness):
 
     assert stop_count(harness.calls_log) == 1
     assert harness.pod_state.read_text().strip() == "stopped"
+
+
+# ============================================== 9b. rollout empty-CSV abort
+
+def test_rollouts_empty_csv_aborts(harness):
+    """A rollout whose synced CSV lands empty is exactly the 07-06
+    compute-and-discard failure mode: abort + stop, never continue to the
+    next link."""
+    rows = _valid_12_rows(harness)
+    tsv = harness.write_tsv(rows)
+    proc = harness.run("rollouts", str(tsv), env={"STUB_EMPTY_CSV": "1"})
+    assert proc.returncode != 0
+    assert "missing/empty locally after sync" in (proc.stdout + proc.stderr)
+    assert len(parse_calls(harness.calls_log)) == 1   # aborted on link 1
+    assert stop_count(harness.calls_log) >= 1
 
 
 # =========================================================== 10. pod not running
