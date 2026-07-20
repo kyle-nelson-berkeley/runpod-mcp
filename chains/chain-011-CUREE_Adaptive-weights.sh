@@ -132,7 +132,7 @@
 # spend_report read failure is logged and the chain continues (supervise's
 # own caps + the deadman fuse bound the burn either way).
 #
-# SPEND GUARDS: TRAIN_GUARD_USD=$2.75 + ROLLOUT_GUARD_USD=$1.25.
+# SPEND GUARDS: TRAIN_GUARD_USD=$5.00 + ROLLOUT_GUARD_USD=$1.25.
 # check_spend runs after the probe, after each training link (control +
 # each adaptive seed), and after rollout links 1-3 (010's placement — link 4
 # owns the stop, so no post-check follows it).
@@ -163,7 +163,7 @@ ORACLE="$REPO/src/adaptive_analysis.py"
 BUILDER="$REPO/src/apply_adaptive_patch.py"
 
 # Spend guards (deltas from each phase's own baseline).
-TRAIN_GUARD_USD="2.75"
+TRAIN_GUARD_USD="5.00"
 ROLLOUT_GUARD_USD="1.25"
 
 # DR_2 is the only level this campaign ever touches (curee DR_TABLES["DR_2"],
