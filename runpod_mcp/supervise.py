@@ -28,7 +28,21 @@ tests — only `rt.cfg` and `rt.ssh.rsync_pull` (the one call that bypasses
 `rt` directly.
 
 `supervise()` never talks to the real Keychain/network; only `main()` calls
-`tools.runtime()` to build the real Runtime.
+`tools.runtime(<vehicle>)` to build the real Runtime.
+
+TWO AXES, DELIBERATELY DECOUPLED (CLI contract):
+  * `--training VEHICLE`  — the TRAINING axis: which physical MODEL is trained
+    (curee | bluerov2). Validated by launch_training's dry-run, never here.
+  * `--vehicle VEHICLE`   — the POD-ROUTING axis: which pod/volume/log dir the
+    job runs against (hippocampus | bluerov2). In `--training` mode it DERIVES
+    from the training vehicle via `tools.TRAINING_VEHICLE_TO_POD` (unknown
+    training vehicles fall back to hippocampus and still hit launch_training's
+    own actionable refusal); an explicit `--vehicle` that CONTRADICTS the
+    derivation is an argparse error (fail-fast). In `--job-name` mode it
+    defaults to hippocampus — the pre-existing lts-replication pod.
+`main()` builds ONE `tools.runtime(<resolved>)`; everything downstream
+(summary path, job-dir pull, every tool call) is scoped by that bound Runtime,
+so there is deliberately no hardcoded `logs/pod` anywhere in this module.
 """
 import argparse
 import json
@@ -70,9 +84,14 @@ def _iso_now() -> str:
 @dataclass
 class JobSpec:
     """mode ∈ {"training", "job"}. training uses vehicle/dr/seed/extra_args;
-    job uses name/command/workdir/max_runtime_sec. The rest are common."""
+    job uses name/command/workdir/max_runtime_sec. The rest are common.
+
+    NOTE the two axes: `vehicle` is the TRAINING vehicle (which model is
+    trained) and `pod_vehicle` is the POD-ROUTING vehicle (which pod/volume the
+    job runs on). They are separate fields on purpose — see the module
+    docstring. `pod_vehicle` lands in every summary via asdict()."""
     mode: str
-    # --training
+    # --training (TRAINING axis)
     vehicle: str | None = None
     dr: str | None = None
     seed: int = 1
@@ -89,6 +108,9 @@ class JobSpec:
     no_stop: bool = False
     sync_subdir: str = "rsl_rl/warpauv_direct"
     summary_path: str | None = None
+    # POD-ROUTING axis — the vehicle whose Runtime main() bound. Recorded (not
+    # acted on) here: the routing already happened when the Runtime was built.
+    pod_vehicle: str = "hippocampus"
 
 
 # ------------------------------------------------------------- launch helpers
@@ -361,8 +383,12 @@ def supervise(rt, spec: JobSpec, *, sleep=time.sleep, now=time.monotonic,
     else:
         job_id = launched["job_id"]
 
+    # The resolved POD is echoed here (not just the vehicle name): with two
+    # pods live, "which machine did this run touch" must be answerable from
+    # the first line of the log, not inferred from the summary later.
     log(f"[supervise] {'adopted' if adopted else 'launched'} job_id={job_id} "
-       f"mode={spec.mode} max_wait_sec={max_wait_sec}")
+       f"mode={spec.mode} vehicle={spec.pod_vehicle} "
+       f"pod={rt.cfg['pod_name']} max_wait_sec={max_wait_sec}")
 
     # 4. POLL LOOP — exactly two exits: terminal state, or deadline while
     # still non-terminal (ANOMALY -> force stop). A job_status call raising
@@ -418,6 +444,14 @@ def _build_parser() -> argparse.ArgumentParser:
                            "dry-run, never re-validated here")
     mode.add_argument("--job-name", metavar="NAME")
 
+    p.add_argument("--vehicle", choices=("hippocampus", "bluerov2"), default=None,
+                   help="which POD/VOLUME to run against (routing axis, NOT "
+                        "the trained model). In --training mode this DERIVES "
+                        "from the training vehicle (curee -> hippocampus, "
+                        "bluerov2 -> bluerov2) and an explicit value must "
+                        "match; in --job-name mode it defaults to hippocampus "
+                        "(the pre-existing lts-replication pod).")
+
     p.add_argument("--dr", help="DR level (--training mode; required)")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--extra-args", default="")
@@ -438,6 +472,28 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _resolve_pod_vehicle(args: argparse.Namespace,
+                         parser: argparse.ArgumentParser) -> str:
+    """Which POD the job runs on. In --training mode the routing DERIVES from
+    the training vehicle; an UNKNOWN training vehicle falls back to
+    hippocampus and is left for launch_training's own dry-run refusal to
+    report (one actionable error, not two competing ones).
+
+    A CONTRADICTING explicit --vehicle is rejected here rather than left to a
+    downstream content-anchor mismatch: fail-fast, before any Runtime exists
+    or any pod is touched."""
+    if args.training:
+        derived = tools.TRAINING_VEHICLE_TO_POD.get(args.training, "hippocampus")
+        if args.vehicle is not None and args.vehicle != derived:
+            parser.error(
+                f"--vehicle {args.vehicle!r} contradicts --training "
+                f"{args.training!r}, which routes to the {derived!r} pod "
+                "(derivation: tools.TRAINING_VEHICLE_TO_POD). Drop --vehicle, "
+                f"or pass --vehicle {derived}.")
+        return derived
+    return args.vehicle or "hippocampus"
+
+
 def _spec_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> JobSpec:
     # Numeric hygiene (applies to both modes): a 0/negative --interval would
     # busy-spin the poll loop (and real time.sleep raises on a negative); a
@@ -451,6 +507,8 @@ def _spec_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -
     if args.backstop < 0:
         parser.error("--backstop must be a non-negative integer (seconds)")
 
+    pod_vehicle = _resolve_pod_vehicle(args, parser)
+
     if args.training:
         if not args.dr:
             parser.error("--training requires --dr")
@@ -460,7 +518,8 @@ def _spec_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -
                        seed=args.seed, extra_args=args.extra_args,
                        interval=args.interval, max_wait=args.max_wait,
                        backstop=args.backstop, no_stop=args.no_stop,
-                       sync_subdir=sync_subdir, summary_path=args.summary_path)
+                       sync_subdir=sync_subdir, summary_path=args.summary_path,
+                       pod_vehicle=pod_vehicle)
 
     if not args.command:
         parser.error("--job-name requires --command")
@@ -471,14 +530,17 @@ def _spec_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -
                    workdir=args.workdir, max_runtime_sec=args.max_runtime_sec,
                    interval=args.interval, max_wait=args.max_wait,
                    backstop=args.backstop, no_stop=args.no_stop,
-                   sync_subdir=args.sync_subdir, summary_path=args.summary_path)
+                   sync_subdir=args.sync_subdir, summary_path=args.summary_path,
+                   pod_vehicle=pod_vehicle)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     spec = _spec_from_args(args, parser)
-    summary = supervise(tools.runtime(), spec)
+    # ONE Runtime, bound to the resolved vehicle — every pod/volume/log-dir
+    # decision downstream follows from it.
+    summary = supervise(tools.runtime(spec.pod_vehicle), spec)
     return int(summary["process_exit_code"])
 
 

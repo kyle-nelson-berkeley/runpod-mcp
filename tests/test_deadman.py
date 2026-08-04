@@ -513,7 +513,7 @@ def test_key_probe_refusal_writes_default_stamped_summary(monkeypatch, tmp_path)
     assert expected.exists()
     assert json.loads(expected.read_text())["outcome"] == "refused"
 
-    result = deadman.status(log=NOLOG)   # default pid file + default glob
+    result = deadman.status(vehicle="hippocampus", log=NOLOG)   # default paths
     assert result["state"] == "refused"
     assert result["exit_code"] == 0
 
@@ -935,7 +935,8 @@ def test_main_status_wiring_no_pidfile(tmp_path, capsys):
 
 
 def test_main_cancel_wiring_no_pidfile(tmp_path, capsys):
-    rc = deadman.main(["cancel", "--pid-file", str(tmp_path / "d.pid")])
+    rc = deadman.main(["cancel", "--vehicle", "hippocampus",
+                       "--pid-file", str(tmp_path / "d.pid")])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["outcome"] == "not_armed"
@@ -952,7 +953,8 @@ def test_main_arm_refusal_exit_code_and_json(monkeypatch, tmp_path, capsys):
         pytest.fail("main()'s refusal path must never touch tools.runtime")
     monkeypatch.setattr(deadman.tools, "runtime", _must_not_build_runtime)
 
-    rc = deadman.main(["arm", "--hours", "3.0", "--no-probe-key",
+    rc = deadman.main(["arm", "--vehicle", "hippocampus",
+                       "--hours", "3.0", "--no-probe-key",
                        "--pid-file", str(pid_file),
                        "--summary-path", str(tmp_path / "s.json")])
     assert rc == 2
@@ -962,7 +964,347 @@ def test_main_arm_refusal_exit_code_and_json(monkeypatch, tmp_path, capsys):
 
 # =============================================================== 12. deadman.sh
 
+def _deadman_sh() -> Path:
+    return Path(__file__).resolve().parents[1] / "deadman.sh"
+
+
 def test_deadman_sh_is_syntactically_valid():
-    script = Path(__file__).resolve().parents[1] / "deadman.sh"
-    result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+    result = subprocess.run(["bash", "-n", str(_deadman_sh())],
+                            capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_deadman_sh_usage_block_documents_the_vehicle_contract():
+    """The launcher's usage comment is the contract an operator actually
+    reads before arming a fuse — it must show the now-REQUIRED --vehicle."""
+    text = _deadman_sh().read_text()
+    assert "arm --vehicle hippocampus" in text
+    assert "cancel --vehicle" in text
+
+
+# ================================================ 13. per-vehicle artifact dirs
+#
+# The vehicle is the DIRECTORY; filenames are unchanged. hippocampus resolves
+# byte-identically to the pre-refactor paths (logs/pod/...), so every summary
+# written before this refactor stays visible to hippocampus status.
+
+def _fake_two_vehicle_config(monkeypatch, tmp_path) -> dict:
+    """Inject a raw pod_defaults view whose two vehicles' local_log_dirs land
+    under tmp_path. Uses the module's documented config seam
+    (deadman.config.load_defaults / .REPO_ROOT are module attributes); the real
+    merged_vehicle_cfg does the flattening, so the overlay shape is exercised."""
+    raw = {
+        "ssh_identity": "~/.ssh/id_ed25519",
+        "vehicles": {
+            "hippocampus": {"pod_name": "lts-replication",
+                            "local_log_dir": "logs/pod"},
+            "bluerov2": {"pod_name": "lts-replication-bluerov2",
+                         "local_log_dir": "logs/pod/bluerov2"},
+        },
+    }
+    monkeypatch.setattr(deadman.config, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(deadman.config, "load_defaults", lambda *a, **kw: raw)
+    return raw
+
+
+def test_hippocampus_default_paths_are_identical_to_pre_refactor(monkeypatch, tmp_path):
+    """Backward-compat regression against the REAL committed pod_defaults.yaml:
+    hippocampus must still be logs/pod/deadman.pid + logs/pod/deadman-*.json."""
+    monkeypatch.setattr(deadman.config, "REPO_ROOT", tmp_path)
+
+    assert deadman._default_pid_file("hippocampus") == \
+        tmp_path / "logs" / "pod" / "deadman.pid"
+    assert deadman._default_summary_path("hippocampus", "2026-07-15T12:00:00+00:00") == \
+        tmp_path / "logs" / "pod" / "deadman-20260715-120000.json"
+    assert deadman._default_summary_glob("hippocampus") == \
+        str(tmp_path / "logs" / "pod" / "deadman-*.json")
+
+
+def test_bluerov2_defaults_live_in_their_own_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(deadman.config, "REPO_ROOT", tmp_path)
+    bluerov_dir = tmp_path / "logs" / "pod" / "bluerov2"
+
+    assert deadman._default_pid_file("bluerov2") == bluerov_dir / "deadman.pid"
+    assert deadman._default_summary_path("bluerov2", "2026-07-15T12:00:00+00:00") == \
+        bluerov_dir / "deadman-20260715-120000.json"
+    assert deadman._default_summary_glob("bluerov2") == \
+        str(bluerov_dir / "deadman-*.json")
+
+
+def test_neither_vehicles_glob_sees_the_others_summaries(monkeypatch, tmp_path):
+    """glob.glob's `*` never crosses `/`, so nesting bluerov2 INSIDE logs/pod
+    keeps the two summary sets disjoint — even when bluerov2's stamp is later."""
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+    hippo_dir = tmp_path / "logs" / "pod"
+    bluerov_dir = hippo_dir / "bluerov2"
+    bluerov_dir.mkdir(parents=True)
+    (hippo_dir / "deadman-20260715-000000.json").write_text(
+        json.dumps({"outcome": "stopped"}))
+    (bluerov_dir / "deadman-20260716-000000.json").write_text(
+        json.dumps({"outcome": "stop_failed"}))
+
+    assert deadman.status(vehicle="hippocampus", log=NOLOG)["state"] == "stopped"
+    assert deadman.status(vehicle="bluerov2", log=NOLOG)["state"] == "stop_failed"
+
+
+def test_arm_uses_the_vehicles_default_directory(monkeypatch, tmp_path):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+    _always_stopped(monkeypatch)
+
+    spec = deadman.ArmSpec(hours=0.0, retries=1, spacing_sec=0, probe_key=False,
+                           vehicle="bluerov2")
+    summary = deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                          now=lambda: 0.0, iso_now=lambda: "2026-07-15T12:00:00+00:00",
+                          log=NOLOG)
+
+    assert summary["outcome"] == "stopped"
+    expected = tmp_path / "logs" / "pod" / "bluerov2" / "deadman-20260715-120000.json"
+    assert expected.exists()
+    assert not (tmp_path / "logs" / "pod" / "deadman-20260715-120000.json").exists()
+
+
+def test_pid_file_and_summary_record_vehicle_and_pod_name(monkeypatch, tmp_path):
+    """Durable recovery record: a mis-targeted fuse shows up immediately."""
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+    _always_stopped(monkeypatch)
+
+    captured = {}
+    real_create = deadman._create_pid_file
+
+    def spy(pid_file, *args, **kwargs):
+        real_create(pid_file, *args, **kwargs)
+        captured.update(json.loads(Path(pid_file).read_text()))
+    monkeypatch.setattr(deadman, "_create_pid_file", spy)
+
+    spec = _spec(tmp_path, vehicle="bluerov2")
+    summary = deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                          now=lambda: 0.0, iso_now=lambda: ISO_T0, log=NOLOG)
+
+    assert captured["vehicle"] == "bluerov2"
+    assert captured["pod_name"] == "lts-replication-bluerov2"
+    assert summary["vehicle"] == "bluerov2"
+    assert summary["pod_name"] == "lts-replication-bluerov2"
+    on_disk = json.loads(spec.summary_path.read_text())
+    assert on_disk["vehicle"] == "bluerov2"
+    assert on_disk["pod_name"] == "lts-replication-bluerov2"
+
+
+def test_arm_first_log_line_names_vehicle_pod_and_artifact_dir(monkeypatch, tmp_path):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+    _always_stopped(monkeypatch)
+
+    lines = []
+    deadman.arm(_spec(tmp_path, vehicle="bluerov2"), rt_factory=lambda: object(),
+                sleep=lambda s: None, now=lambda: 0.0, iso_now=lambda: ISO_T0,
+                log=lines.append)
+
+    assert "vehicle=bluerov2" in lines[0]
+    assert "lts-replication-bluerov2" in lines[0]
+    assert str(tmp_path / "logs" / "pod" / "bluerov2") in lines[0]
+
+
+def test_cancel_first_log_line_names_vehicle_pod_and_artifact_dir(monkeypatch, tmp_path):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+
+    lines = []
+    result = deadman.cancel(vehicle="bluerov2", log=lines.append)
+
+    assert result["outcome"] == "not_armed"
+    assert "vehicle=bluerov2" in lines[0]
+    assert "lts-replication-bluerov2" in lines[0]
+    assert str(tmp_path / "logs" / "pod" / "bluerov2") in lines[0]
+
+
+def test_arm_refuses_when_the_vehicle_config_cannot_be_read(monkeypatch):
+    """Fail-fast arm discipline: an unreadable/unknown vehicle config means we
+    cannot know WHICH pod this fuse would stop — refuse, never guess."""
+    def boom(*args, **kwargs):
+        raise config.ConfigError("pod_defaults.yaml is unreadable")
+    monkeypatch.setattr(deadman.config, "load_defaults", boom)
+
+    spec = deadman.ArmSpec(hours=0.0, retries=1, spacing_sec=0, probe_key=False,
+                           vehicle="hippocampus")
+    with pytest.raises(deadman.ArmRefused, match="unreadable"):
+        deadman.arm(spec, rt_factory=lambda: object(), sleep=lambda s: None,
+                    now=lambda: 0.0, iso_now=lambda: ISO_T0, log=NOLOG)
+
+
+@pytest.mark.parametrize("kwargs", [{"vehicle": "hippocampus"}, {}])
+def test_status_config_read_failure_is_a_clean_error_not_a_traceback(monkeypatch, kwargs):
+    def boom(*args, **kwargs_):
+        raise config.ConfigError("pod_defaults.yaml is unreadable")
+    monkeypatch.setattr(deadman.config, "load_defaults", boom)
+
+    result = deadman.status(log=NOLOG, **kwargs)
+    assert result["state"] == "config_error"
+    assert result["exit_code"] == 2
+    assert "unreadable" in result["message"]
+
+
+# ======================================== 14. status across ALL vehicles
+
+def test_status_without_vehicle_reports_every_declared_vehicle(monkeypatch, tmp_path):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+
+    result = deadman.status(log=NOLOG)
+
+    assert set(result["vehicles"]) == {"hippocampus", "bluerov2"}
+    assert result["state"] == "not_armed"
+    assert result["exit_code"] == 0
+
+
+def test_status_all_vehicles_lost_bluerov2_never_hides_behind_quiet_hippocampus(
+        monkeypatch, tmp_path):
+    """THE POINT: a LOST bluerov2 fuse reported as a hippocampus-only
+    not_armed/exit-0 is the exact false comfort this tool exists to kill."""
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+    bluerov_dir = tmp_path / "logs" / "pod" / "bluerov2"
+    bluerov_dir.mkdir(parents=True)
+    (bluerov_dir / "deadman.pid").write_text(
+        json.dumps({"pid": 222, "fire_at": ISO_T0}))
+    monkeypatch.setattr(deadman, "_is_deadman_process", lambda pid: False)
+
+    result = deadman.status(log=NOLOG)
+
+    assert result["vehicles"]["hippocampus"]["state"] == "not_armed"
+    assert result["vehicles"]["bluerov2"]["state"] == "LOST"
+    assert result["state"] == "LOST"        # worst-wins
+    assert result["exit_code"] == 1
+
+
+def test_status_all_vehicles_one_armed_one_lost_still_exits_one(monkeypatch, tmp_path):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+    hippo_dir = tmp_path / "logs" / "pod"
+    bluerov_dir = hippo_dir / "bluerov2"
+    bluerov_dir.mkdir(parents=True)
+    (hippo_dir / "deadman.pid").write_text(
+        json.dumps({"pid": 111, "fire_at": "2026-07-15T03:00:00+00:00"}))
+    (bluerov_dir / "deadman.pid").write_text(
+        json.dumps({"pid": 222, "fire_at": ISO_T0}))
+    monkeypatch.setattr(deadman, "_is_deadman_process", lambda pid: pid == 111)
+
+    result = deadman.status(now=lambda: "2026-07-15T01:00:00+00:00", log=NOLOG)
+
+    assert result["vehicles"]["hippocampus"]["state"] == "armed"
+    assert result["vehicles"]["bluerov2"]["state"] == "LOST"
+    assert result["state"] == "LOST"
+    assert result["exit_code"] == 1
+
+
+def test_status_all_vehicles_both_quiet_exits_zero(monkeypatch, tmp_path):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+    hippo_dir = tmp_path / "logs" / "pod"
+    bluerov_dir = hippo_dir / "bluerov2"
+    bluerov_dir.mkdir(parents=True)
+    (hippo_dir / "deadman-20260715-000000.json").write_text(
+        json.dumps({"outcome": "stopped"}))
+    (bluerov_dir / "deadman-20260715-000000.json").write_text(
+        json.dumps({"outcome": "cancelled"}))
+
+    result = deadman.status(log=NOLOG)
+
+    assert result["exit_code"] == 0
+    assert result["vehicles"]["hippocampus"]["state"] == "stopped"
+    assert result["vehicles"]["bluerov2"]["state"] == "cancelled"
+
+
+def test_status_with_vehicle_flag_is_the_flat_single_vehicle_shape(monkeypatch, tmp_path):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+
+    result = deadman.status(vehicle="hippocampus", log=NOLOG)
+
+    assert "vehicles" not in result
+    assert result == {"state": "not_armed", "message": "no pid file, no prior summary",
+                      "exit_code": 0}
+
+
+def test_explicit_path_overrides_keep_the_flat_shape_without_a_vehicle(tmp_path):
+    """An explicit --pid-file/--summary-glob PINS one artifact set — it stays
+    the flat single-fuse shape, exactly as before this refactor."""
+    result = deadman.status(pid_file=tmp_path / "nope.pid",
+                            summary_glob=str(tmp_path / "deadman-*.json"), log=NOLOG)
+    assert "vehicles" not in result
+    assert result["state"] == "not_armed"
+
+
+# ================================================ 15. CLI vehicle contract
+
+@pytest.mark.parametrize("argv", [
+    ["arm", "--hours", "3.0", "--no-probe-key"],
+    ["cancel"],
+])
+def test_arm_and_cancel_require_an_explicit_vehicle(argv, capsys):
+    """A mis-armed fuse is silently wrong for HOURS — no default here."""
+    with pytest.raises(SystemExit) as exc_info:
+        deadman.main(argv)
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--vehicle" in err
+    assert "hippocampus" in err and "bluerov2" in err
+    assert "lts-replication" in err   # names the pod hippocampus means
+
+
+def test_main_status_without_vehicle_aggregates_all_vehicles(monkeypatch, tmp_path, capsys):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+
+    rc = deadman.main(["status"])
+
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert set(out["vehicles"]) == {"hippocampus", "bluerov2"}
+
+
+def test_main_status_with_vehicle_is_flat(monkeypatch, tmp_path, capsys):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+
+    rc = deadman.main(["status", "--vehicle", "bluerov2"])
+
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "vehicles" not in out
+    assert out["state"] == "not_armed"
+
+
+def test_main_arm_wires_a_vehicle_scoped_lazy_runtime_factory(monkeypatch, capsys):
+    """rt_factory stays LAZY (built only at fire time, hours later) AND is
+    bound to the resolved vehicle."""
+    seen = []
+
+    def fake_runtime(vehicle="hippocampus"):
+        seen.append(vehicle)
+        return object()
+    monkeypatch.setattr(deadman.tools, "runtime", fake_runtime)
+
+    captured = {}
+
+    def fake_arm(spec, *, rt_factory, **kwargs):
+        captured["spec"] = spec
+        captured["rt_factory"] = rt_factory
+        return {"outcome": "cancelled", "exit_code": 0}
+    monkeypatch.setattr(deadman, "arm", fake_arm)
+
+    rc = deadman.main(["arm", "--vehicle", "bluerov2", "--hours", "3.0",
+                       "--no-probe-key"])
+    capsys.readouterr()
+
+    assert rc == 0
+    assert captured["spec"].vehicle == "bluerov2"
+    assert seen == []                 # never built at arm time
+    captured["rt_factory"]()          # ...only when the fuse fires
+    assert seen == ["bluerov2"]
+
+
+def test_main_cancel_passes_the_vehicle_through(monkeypatch, tmp_path, capsys):
+    _fake_two_vehicle_config(monkeypatch, tmp_path)
+    seen = {}
+
+    def fake_cancel(*, vehicle="hippocampus", pid_file=None, log=None):
+        seen["vehicle"] = vehicle
+        return {"outcome": "not_armed", "exit_code": 0}
+    monkeypatch.setattr(deadman, "cancel", fake_cancel)
+
+    rc = deadman.main(["cancel", "--vehicle", "bluerov2"])
+    capsys.readouterr()
+
+    assert rc == 0
+    assert seen["vehicle"] == "bluerov2"

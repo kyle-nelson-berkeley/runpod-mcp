@@ -9,6 +9,7 @@ and goes straight through the Runtime's ssh client), so it is exercised via a
 purpose-built recording SSH fake that subclasses tests.test_tools.FakeSSH.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -677,3 +678,156 @@ def test_genuine_bug_is_not_masked_as_a_refusal(monkeypatch, tmp_path):
     clock = FakeClock()
     with pytest.raises(KeyError):
         supervise.supervise(rt, spec, sleep=clock.sleep, now=clock.now, log=NOLOG)
+
+
+# ================================================ 12. pod routing (--vehicle)
+#
+# TWO AXES, deliberately decoupled: `--training VEHICLE` says which physical
+# MODEL is trained (JobSpec.vehicle), `--vehicle` says which POD/VOLUME the job
+# runs on (JobSpec.pod_vehicle). In --training mode the second DERIVES from the
+# first via tools.TRAINING_VEHICLE_TO_POD.
+
+def _capture_runtime(monkeypatch, *, pod_status=None):
+    """Fake tools.runtime (no Keychain, no network) and record the vehicle it
+    is asked for. Unless a pod_status fake is supplied, the pod reads as not
+    running so main() refuses immediately after the routing decision."""
+    seen = []
+
+    def fake_runtime(vehicle="hippocampus"):
+        seen.append(vehicle)
+        return object()
+
+    monkeypatch.setattr(supervise.tools, "runtime", fake_runtime)
+    monkeypatch.setattr(supervise.tools, "pod_status",
+                        pod_status or (lambda rt: {"status": "exited"}))
+    return seen
+
+
+def test_training_curee_derives_the_hippocampus_pod(monkeypatch, capsys):
+    seen = _capture_runtime(monkeypatch)
+    rc = supervise.main(["--training", "curee", "--dr", "DR_0"])
+    capsys.readouterr()
+    assert seen == ["hippocampus"]
+    assert rc == 2   # refused: pod not running (routing already happened)
+
+
+def test_training_bluerov2_derives_the_bluerov2_pod(monkeypatch, capsys):
+    seen = _capture_runtime(monkeypatch)
+    supervise.main(["--training", "bluerov2", "--dr", "DR_0"])
+    capsys.readouterr()
+    assert seen == ["bluerov2"]
+
+
+def test_matching_explicit_vehicle_is_accepted(monkeypatch, capsys):
+    seen = _capture_runtime(monkeypatch)
+    supervise.main(["--training", "bluerov2", "--dr", "DR_0", "--vehicle", "bluerov2"])
+    capsys.readouterr()
+    assert seen == ["bluerov2"]
+
+
+def test_conflicting_explicit_vehicle_is_argparse_error_naming_both(monkeypatch, capsys):
+    """Fail-fast beats relying on a content-anchor mismatch downstream: the
+    message must name BOTH values and the derivation rule."""
+    seen = _capture_runtime(monkeypatch)
+    with pytest.raises(SystemExit) as exc_info:
+        supervise.main(["--training", "curee", "--dr", "DR_0",
+                        "--vehicle", "bluerov2"])
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "curee" in err and "bluerov2" in err and "hippocampus" in err
+    assert seen == []   # no Runtime is ever built on the conflict path
+
+
+def test_unknown_training_vehicle_still_routes_to_hippocampus_then_dry_run_refuses(
+        monkeypatch, capsys):
+    """An unknown training vehicle does NOT become a routing error — it keeps
+    hitting launch_training's own actionable dry-run refusal, exactly as today."""
+    seen = _capture_runtime(monkeypatch, pod_status=lambda rt: {"status": "running"})
+    make_launch_training(
+        monkeypatch, dry_run_error=training.TrainingError("unknown vehicle 'hippo'"))
+
+    rc = supervise.main(["--training", "hippo", "--dr", "DR_0"])
+
+    assert seen == ["hippocampus"]
+    assert rc == 2
+    assert "unknown vehicle" in json.loads(capsys.readouterr().out)["reason"]
+
+
+def test_job_name_mode_defaults_to_hippocampus(monkeypatch, capsys):
+    seen = _capture_runtime(monkeypatch)
+    supervise.main(["--job-name", "eval", "--command", "true",
+                    "--sync-subdir", "none"])
+    capsys.readouterr()
+    assert seen == ["hippocampus"]
+
+
+def test_job_name_mode_honors_an_explicit_vehicle(monkeypatch, capsys):
+    seen = _capture_runtime(monkeypatch)
+    supervise.main(["--job-name", "eval", "--command", "true",
+                    "--sync-subdir", "none", "--vehicle", "bluerov2"])
+    capsys.readouterr()
+    assert seen == ["bluerov2"]
+
+
+def test_unknown_vehicle_value_is_an_argparse_error(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        supervise.main(["--job-name", "eval", "--command", "true",
+                        "--sync-subdir", "none", "--vehicle", "curee"])
+    assert exc_info.value.code == 2
+
+
+def test_pod_vehicle_lands_in_the_durable_summary(monkeypatch, tmp_path):
+    """asdict(spec) carries the routing decision into every summary — the
+    durable record of WHICH POD a run touched."""
+    calls = []
+    rt = _make_rt(calls, local_log_dir=tmp_path)
+    monkeypatch.setattr(supervise.tools, "pod_status", _running)
+    make_launch_training(monkeypatch)
+    make_job_status(monkeypatch, [{"state": "succeeded", "exit_code": 0}])
+    make_capture_fakes(monkeypatch, calls)
+
+    spec = supervise.JobSpec(mode="training", vehicle="bluerov2", dr="DR_0",
+                             pod_vehicle="bluerov2")
+    clock = FakeClock()
+    summary = supervise.supervise(rt, spec, sleep=clock.sleep, now=clock.now,
+                                  log=NOLOG)
+
+    on_disk = json.loads(Path(summary["summary_path"]).read_text())
+    assert on_disk["spec"]["pod_vehicle"] == "bluerov2"   # routing axis
+    assert on_disk["spec"]["vehicle"] == "bluerov2"       # training axis, untouched
+
+
+def test_default_pod_vehicle_is_hippocampus(monkeypatch, tmp_path):
+    """Backward compat: a JobSpec built without the routing field records the
+    pre-existing lts-replication pod."""
+    calls = []
+    rt = _make_rt(calls, local_log_dir=tmp_path)
+    monkeypatch.setattr(supervise.tools, "pod_status", _running)
+    make_launch_training(monkeypatch)
+    make_job_status(monkeypatch, [{"state": "succeeded", "exit_code": 0}])
+    make_capture_fakes(monkeypatch, calls)
+
+    spec = supervise.JobSpec(mode="training", vehicle="curee", dr="DR_0")
+    clock = FakeClock()
+    summary = supervise.supervise(rt, spec, sleep=clock.sleep, now=clock.now,
+                                  log=NOLOG)
+    assert summary["spec"]["pod_vehicle"] == "hippocampus"
+
+
+def test_launch_log_line_names_the_resolved_vehicle_and_pod(monkeypatch, tmp_path):
+    calls = []
+    rt = _make_rt(calls, local_log_dir=tmp_path)
+    monkeypatch.setattr(supervise.tools, "pod_status", _running)
+    make_launch_training(monkeypatch)
+    make_job_status(monkeypatch, [{"state": "succeeded", "exit_code": 0}])
+    make_capture_fakes(monkeypatch, calls)
+
+    lines = []
+    spec = supervise.JobSpec(mode="training", vehicle="curee", dr="DR_0")
+    clock = FakeClock()
+    supervise.supervise(rt, spec, sleep=clock.sleep, now=clock.now,
+                        log=lines.append)
+
+    launch_line = next(line for line in lines if "launched job_id=" in line)
+    assert "vehicle=hippocampus" in launch_line
+    assert f"pod={rt.cfg['pod_name']}" in launch_line

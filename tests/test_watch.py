@@ -891,3 +891,39 @@ class TestCLI:
         rt = _make_rt(local_log_dir=tmp_path)
         path = watch._default_status_path(rt, JOB_ID)
         assert path == tmp_path / f"watch-{JOB_ID}.json"
+
+
+# ================================================= 8. pod routing (--vehicle)
+
+class TestVehicleRouting:
+    """main() binds ONE vehicle's Runtime; everything downstream (status path,
+    ssh, pod_status) is scoped by that bound Runtime. The watch() core itself
+    is faked here — this class pins the routing wire, nothing else."""
+
+    def _capture(self, monkeypatch):
+        seen = []
+
+        def fake_runtime(vehicle="hippocampus"):
+            seen.append(vehicle)
+            return object()
+
+        monkeypatch.setattr(watch.tools, "runtime", fake_runtime)
+        monkeypatch.setattr(watch, "watch",
+                            lambda rt, spec: {"process_exit_code": 0})
+        return seen
+
+    def test_default_is_hippocampus(self, monkeypatch):
+        seen = self._capture(monkeypatch)
+        rc = watch.main(["--job-id", JOB_ID])
+        assert seen == ["hippocampus"]
+        assert rc == 0
+
+    def test_explicit_vehicle_is_passed_through(self, monkeypatch):
+        seen = self._capture(monkeypatch)
+        watch.main(["--job-id", JOB_ID, "--vehicle", "bluerov2"])
+        assert seen == ["bluerov2"]
+
+    def test_unknown_vehicle_is_an_argparse_error(self):
+        with pytest.raises(SystemExit) as exc_info:
+            watch.main(["--vehicle", "curee"])
+        assert exc_info.value.code == 2

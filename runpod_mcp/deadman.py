@@ -10,13 +10,31 @@ process staying alive — arm it once at launch, and it fires on its own clock,
 sleeping ~N hours then stopping the pod (with retries), unless cancelled.
 
 USAGE:
-  ./deadman.sh arm --hours 3.0 &     # background it (re-arm before it fires
+  ./deadman.sh arm --vehicle hippocampus --hours 3.0 &
+                                      # background it (re-arm before it fires
                                       # to extend: `cancel` then a fresh `arm`)
-  ./deadman.sh status                 # armed / LOST / last outcome — no network
-  ./deadman.sh cancel                 # disarm cleanly before a normal stop_pod
+  ./deadman.sh status                 # ALL vehicles: armed / LOST / last
+                                      # outcome — no network
+  ./deadman.sh status --vehicle bluerov2      # just one (flat shape)
+  ./deadman.sh cancel --vehicle hippocampus   # disarm before a normal stop_pod
   # Re-arm = cancel, then a FRESH `arm` in the background. There is no
   # compound "rearm" subcommand on purpose — the two-step keeps the state
   # machine trivial and the new fuse window explicit.
+
+VEHICLES (two pods, two fuses). `--vehicle hippocampus|bluerov2` selects which
+pod a fuse guards; hippocampus IS the pre-existing lts-replication pod.
+`arm` and `cancel` REQUIRE it explicitly — no default — because a fuse aimed at
+the wrong pod is silently wrong for HOURS (it reports healthy while the real
+pod bills). `status` takes it OPTIONALLY: with no `--vehicle` it reports EVERY
+declared vehicle and returns the WORST result, so a LOST bluerov2 fuse can
+never hide behind a quiet hippocampus exit-0.
+
+Artifacts are separated by DIRECTORY, never by filename: each vehicle's
+`local_log_dir` (from pod_defaults.yaml) holds the same `deadman.pid` /
+`deadman-<stamp>.json` names. hippocampus therefore resolves byte-identically
+to the pre-refactor paths (`logs/pod/...`) and keeps seeing every summary
+written before vehicles existed; bluerov2 nests at `logs/pod/bluerov2/`, and
+since a glob `*` never crosses `/`, neither vehicle's glob sees the other's.
 
 This is a Mac-side background CLI, NOT an MCP tool — invoke it directly,
 never through .mcp.json. The stdio server's 14-tool surface is untouched;
@@ -26,12 +44,16 @@ TEST SEAM (identical to supervise.py — read this before writing a test):
 every call into the tool surface goes through the MODULE ATTRIBUTE —
 `tools.stop_pod(rt)` via `from . import tools`, never `from .tools import
 stop_pod`; likewise `config.fetch_api_key()` / `config.scrub(...)` /
-`config.REPO_ROOT` via `from . import config`, never `from .config import
-X`. Tests exercise this by monkeypatching module attributes (e.g.
+`config.REPO_ROOT` / `config.load_defaults()` / `config.merged_vehicle_cfg()`
+via `from . import config`, never `from .config import X`. Tests exercise this
+by monkeypatching module attributes (e.g.
 `monkeypatch.setattr(deadman.tools, "stop_pod", fake)`,
-`monkeypatch.setattr(deadman.config, "fetch_api_key", fake)`), so a real
-Runtime/API/SSH stack — or the real macOS Keychain — is never required for
-any test in this module.
+`monkeypatch.setattr(deadman.config, "fetch_api_key", fake)`,
+`monkeypatch.setattr(deadman.config, "load_defaults", lambda: fake_raw)`), so a
+real Runtime/API/SSH stack — or the real macOS Keychain — is never required for
+any test in this module. Per-vehicle path resolution is CONFIG-ONLY: a local
+YAML read, no Keychain and no network, so `status`'s "NO network, ever"
+contract is untouched.
 
 LAZY RUNTIME: `arm()` / `run_armed()` never build a Runtime themselves — they
 take `rt_factory`, a zero-arg callable, and invoke it only once firing
@@ -86,12 +108,18 @@ def _iso_now() -> str:
 
 @dataclass
 class ArmSpec:
+    """`vehicle` picks WHICH POD this fuse guards (and therefore which
+    artifact directory it uses). The dataclass default is hippocampus — the
+    pre-existing lts-replication pod — so a spec built in code keeps the
+    historical behavior; the CLI deliberately does NOT default it (see
+    `_require_vehicle`)."""
     hours: float = 3.0
     retries: int = 5
     spacing_sec: int = 300
     pid_file: Path | None = None
     summary_path: Path | None = None
     probe_key: bool = True
+    vehicle: str = "hippocampus"
 
 
 # --------------------------------------------------------------- pid liveness
@@ -155,22 +183,51 @@ def _remove(path: Path) -> None:
         pass
 
 
-# ------------------------------------------------------------- default paths
+# ------------------------------------------------- per-vehicle default paths
+#
+# THE VEHICLE IS THE DIRECTORY, uniformly — filenames never change. Resolution
+# is CONFIG-ONLY (a local YAML read: no Keychain, no network), so `status` keeps
+# its "NO network, ever" contract. Consequences worth stating out loud:
+#   * hippocampus resolves to REPO_ROOT/logs/pod/... — byte-identical to the
+#     pre-vehicles paths, so every summary written before this refactor stays
+#     visible to hippocampus `status`;
+#   * bluerov2 nests at REPO_ROOT/logs/pod/bluerov2/, and since a glob `*`
+#     never crosses `/`, neither vehicle's summary glob can see the other's.
 
-def _default_pid_file() -> Path:
-    return config.REPO_ROOT / "logs" / "pod" / "deadman.pid"
+def _vehicle_cfg(vehicle: str) -> dict:
+    """The merged (flat) per-vehicle config. Raises ConfigError for an unknown
+    vehicle or an unreadable pod_defaults.yaml — callers decide what that
+    means (arm refuses; status reports a clean error)."""
+    return config.merged_vehicle_cfg(config.load_defaults(), vehicle)
+
+
+def _vehicle_log_dir(vehicle: str) -> Path:
+    return config.REPO_ROOT / _vehicle_cfg(vehicle)["local_log_dir"]
+
+
+def _pod_name_for(vehicle: str) -> str | None:
+    """Best-effort, for the RECORD only (never a gate): a config read failure
+    here must not crash the fire path hours after arm already validated it."""
+    try:
+        return _vehicle_cfg(vehicle)["pod_name"]
+    except Exception:   # noqa: BLE001 — a record field, not an assertion
+        return None
+
+
+def _default_pid_file(vehicle: str) -> Path:
+    return _vehicle_log_dir(vehicle) / "deadman.pid"
 
 
 def _iso_to_stamp(iso: str) -> str:
     return datetime.fromisoformat(iso).strftime("%Y%m%d-%H%M%S")
 
 
-def _default_summary_path(armed_at_iso: str) -> Path:
-    return config.REPO_ROOT / "logs" / "pod" / f"deadman-{_iso_to_stamp(armed_at_iso)}.json"
+def _default_summary_path(vehicle: str, armed_at_iso: str) -> Path:
+    return _vehicle_log_dir(vehicle) / f"deadman-{_iso_to_stamp(armed_at_iso)}.json"
 
 
-def _default_summary_glob() -> str:
-    return str(config.REPO_ROOT / "logs" / "pod" / "deadman-*.json")
+def _default_summary_glob(vehicle: str) -> str:
+    return str(_vehicle_log_dir(vehicle) / "deadman-*.json")
 
 
 def _add_hours_iso(iso: str, hours: float) -> str:
@@ -187,6 +244,10 @@ def _base_summary(spec: ArmSpec, armed_at_iso: str, fire_at_iso: str, pid: int) 
         "retries": spec.retries,
         "spacing_sec": spec.spacing_sec,
         "pid": pid,
+        # WHICH pod this fuse was aimed at — a mis-targeted fuse is otherwise
+        # indistinguishable from a healthy one until the bill arrives.
+        "vehicle": spec.vehicle,
+        "pod_name": _pod_name_for(spec.vehicle),
     }
 
 
@@ -251,9 +312,12 @@ def _reap_stale_pid_file(pid_file: Path, log) -> None:
     _remove(pid_file)
 
 
-def _create_pid_file(pid_file: Path, pid: int, armed_at_iso: str, fire_at_iso: str) -> None:
+def _create_pid_file(pid_file: Path, pid: int, armed_at_iso: str, fire_at_iso: str,
+                     vehicle: str | None = None, pod_name: str | None = None) -> None:
     """O_EXCL create — the double-arm TOCTOU guard: if another arm() raced us
-    between the reap check and here, this raises and we refuse cleanly."""
+    between the reap check and here, this raises and we refuse cleanly. The
+    payload records vehicle/pod_name so a live fuse's TARGET is recoverable
+    from disk alone (the arming session's stdout may be long gone)."""
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(str(pid_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
@@ -262,7 +326,8 @@ def _create_pid_file(pid_file: Path, pid: int, armed_at_iso: str, fire_at_iso: s
             f"pid file {pid_file} appeared concurrently (double-arm race) — "
             "refusing; check for another deadman and retry") from None
     with os.fdopen(fd, "w") as fh:
-        json.dump({"pid": pid, "armed_at": armed_at_iso, "fire_at": fire_at_iso}, fh)
+        json.dump({"pid": pid, "armed_at": armed_at_iso, "fire_at": fire_at_iso,
+                   "vehicle": vehicle, "pod_name": pod_name}, fh)
 
 
 # --------------------------------------------------------------------- core
@@ -376,23 +441,41 @@ def run_armed(spec: ArmSpec, *, pid_file: Path, summary_path: Path,
 def arm(spec: ArmSpec, *, rt_factory, sleep=time.sleep, now=time.monotonic,
        iso_now=_iso_now, log=_default_log, cancel_requested=lambda: False,
        on_fire_start=lambda: None) -> dict:
-    """Full arm lifecycle: pid-file discipline -> (optional) Keychain key
-    probe -> `run_armed()`. Raises ArmRefused (exit 2) for anything that goes
-    wrong BEFORE the fuse is actually armed; nothing here talks to
-    `tools.stop_pod` — that only ever happens inside `run_armed`'s fire
-    sequence, hours later."""
-    pid_file = spec.pid_file or _default_pid_file()
+    """Full arm lifecycle: vehicle resolution -> pid-file discipline ->
+    (optional) Keychain key probe -> `run_armed()`. Raises ArmRefused (exit 2)
+    for anything that goes wrong BEFORE the fuse is actually armed; nothing
+    here talks to `tools.stop_pod` — that only ever happens inside
+    `run_armed`'s fire sequence, hours later."""
+    # Resolve the vehicle FIRST and fail fast: if we cannot say which pod this
+    # fuse would stop, arming it is worse than not arming it — an unaimed fuse
+    # reports "armed" for hours while nothing is actually guarded.
+    try:
+        cfg = _vehicle_cfg(spec.vehicle)
+    except Exception as exc:   # noqa: BLE001 — refusal, not a traceback
+        raise ArmRefused(
+            f"could not resolve vehicle {spec.vehicle!r} from pod_defaults.yaml: "
+            f"{config.scrub(str(exc))} — refusing to arm (a fuse that cannot "
+            "name its pod cannot guard it)") from None
+    pod_name = cfg["pod_name"]
+    artifact_dir = config.REPO_ROOT / cfg["local_log_dir"]
+
+    pid_file = spec.pid_file or (artifact_dir / "deadman.pid")
     armed_at_iso = iso_now()
     armed_at_mono = now()
     fire_at_mono = armed_at_mono + spec.hours * 3600.0
     fire_at_iso = _add_hours_iso(armed_at_iso, spec.hours)
-    summary_path = spec.summary_path or _default_summary_path(armed_at_iso)
+    summary_path = spec.summary_path or (
+        artifact_dir / f"deadman-{_iso_to_stamp(armed_at_iso)}.json")
+
+    log(f"[deadman] arming vehicle={spec.vehicle} pod={pod_name} "
+       f"artifacts={artifact_dir}")
 
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     _reap_stale_pid_file(pid_file, log)
 
     pid = os.getpid()
-    _create_pid_file(pid_file, pid, armed_at_iso, fire_at_iso)
+    _create_pid_file(pid_file, pid, armed_at_iso, fire_at_iso,
+                     vehicle=spec.vehicle, pod_name=pod_name)
 
     if spec.probe_key:
         try:
@@ -420,12 +503,31 @@ def arm(spec: ArmSpec, *, rt_factory, sleep=time.sleep, now=time.monotonic,
 
 # ------------------------------------------------------------------- cancel
 
-def cancel(*, pid_file: Path | None = None, log=_default_log) -> dict:
+def cancel(*, vehicle: str = "hippocampus", pid_file: Path | None = None,
+           log=_default_log) -> dict:
     """SIGTERM the pid-file process, but ONLY after verifying it's actually a
     live deadman (PID-reuse hazard) — never signal an unverified pid. No pid
     file, or a dead/mismatched one, is an idempotent no-op success (and the
-    stale file is reaped)."""
-    pid_file = pid_file or _default_pid_file()
+    stale file is reaped).
+
+    `vehicle` selects WHICH fuse (i.e. which artifact directory). The CLI
+    requires it explicitly; the kwarg default keeps the historical
+    hippocampus behavior for in-code callers."""
+    if pid_file is None:
+        try:
+            cfg = _vehicle_cfg(vehicle)
+        except Exception as exc:   # noqa: BLE001 — clean error, not a traceback
+            message = (f"could not resolve vehicle {vehicle!r} from "
+                       f"pod_defaults.yaml: {config.scrub(str(exc))}")
+            log(f"[deadman] cancel: {message}")
+            return {"outcome": "config_error", "message": message, "exit_code": 2}
+        pid_file = config.REPO_ROOT / cfg["local_log_dir"] / "deadman.pid"
+        log(f"[deadman] cancel: vehicle={vehicle} pod={cfg['pod_name']} "
+           f"artifacts={pid_file.parent}")
+    else:
+        log(f"[deadman] cancel: vehicle={vehicle} "
+           f"pod={_pod_name_for(vehicle)} artifacts={pid_file.parent}")
+
     if not pid_file.exists():
         return {"outcome": "not_armed", "message": "no pid file — nothing to cancel",
                 "exit_code": 0}
@@ -470,9 +572,61 @@ def _remaining_minutes(fire_at_iso: str | None, now_iso: str) -> float | None:
     return round((fire_dt - now_dt).total_seconds() / 60.0, 1)
 
 
-def status(*, pid_file: Path | None = None, summary_glob: str | None = None,
-          now=_iso_now, log=_default_log) -> dict:
-    """NO network, ever. armed (pid file names a verified-live process) |
+# Worst-wins ordering for the all-vehicles roll-up. The PRIMARY key is always
+# the exit code (1 = the pod may still be running); this only breaks ties
+# WITHIN an exit code, so the reported `state` is the most informative one
+# rather than an arbitrary dict-order pick.
+_STATE_SEVERITY = {
+    "not_armed": 0, "stopped": 1, "cancelled": 1, "refused": 2, "armed": 3,
+    "stop_failed": 4, "LOST": 5, "config_error": 6,
+}
+
+
+def status(*, vehicle: str | None = None, pid_file: Path | None = None,
+          summary_glob: str | None = None, now=_iso_now, log=_default_log) -> dict:
+    """NO network, ever (per-vehicle path resolution is a local YAML read).
+
+    THREE call shapes:
+      * `vehicle=None` and no explicit paths -> report EVERY declared vehicle:
+        `{"vehicles": {...}, "state": <worst>, "exit_code": <worst>}`. This is
+        the default for a bare `deadman.sh status`, and it exists because a
+        LOST bluerov2 fuse hiding behind a hippocampus `not_armed`/exit-0 is
+        exactly the false comfort this tool exists to kill.
+      * an explicit `vehicle` -> the flat single-fuse shape below.
+      * an explicit `pid_file`/`summary_glob` -> also flat: the override PINS
+        one artifact set, so aggregating would be meaningless.
+    """
+    if vehicle is None and pid_file is None and summary_glob is None:
+        return _status_all_vehicles(now=now, log=log)
+    return _status_one(vehicle or "hippocampus", pid_file=pid_file,
+                       summary_glob=summary_glob, now=now, log=log)
+
+
+def _status_all_vehicles(*, now, log) -> dict:
+    try:
+        vehicles = sorted(config.load_defaults().get("vehicles") or {})
+    except Exception as exc:   # noqa: BLE001 — clean error, not a traceback
+        return {"vehicles": {}, "state": "config_error",
+                "message": f"could not read pod_defaults.yaml: "
+                           f"{config.scrub(str(exc))}",
+                "exit_code": 2}
+    per = {v: _status_one(v, pid_file=None, summary_glob=None, now=now, log=log)
+           for v in vehicles}
+    if not per:
+        return {"vehicles": {}, "state": "not_armed",
+                "message": "pod_defaults.yaml declares no vehicles",
+                "exit_code": 0}
+    # max() keeps the FIRST maximal element and `per` is in sorted-vehicle
+    # order, so the roll-up is deterministic.
+    worst = max(per, key=lambda v: (per[v]["exit_code"],
+                                    _STATE_SEVERITY.get(per[v]["state"], 0)))
+    return {"vehicles": per, "state": per[worst]["state"],
+            "exit_code": per[worst]["exit_code"]}
+
+
+def _status_one(vehicle: str, *, pid_file: Path | None, summary_glob: str | None,
+               now, log) -> dict:
+    """armed (pid file names a verified-live process) |
     LOST (pid file exists but the process is dead/mismatched — the pod may
     still be running, exit 1 so scripts can alert) | last summary's outcome |
     not_armed (nothing on disk). A LOST fuse must never report as armed —
@@ -482,10 +636,22 @@ def status(*, pid_file: Path | None = None, summary_glob: str | None = None,
     (a refused arm never touched the pod, but its reason is surfaced);
     1 = LOST or stop_failed (both mean the pod may still be running —
     status-based monitoring must be able to alert on them); 2 = usage errors
-    (argparse). A stop_failed summary silently exiting 0 would defeat the
-    monitoring in the exact case that matters. A malformed pid file (bad
-    JSON / non-int pid) reads as LOST — we cannot prove the fuse is alive."""
-    pid_file = pid_file or _default_pid_file()
+    (argparse) and an unreadable vehicle config. A stop_failed summary silently
+    exiting 0 would defeat the monitoring in the exact case that matters. A
+    malformed pid file (bad JSON / non-int pid) reads as LOST — we cannot prove
+    the fuse is alive."""
+    try:
+        if pid_file is None:
+            pid_file = _default_pid_file(vehicle)
+        if summary_glob is None:
+            summary_glob = _default_summary_glob(vehicle)
+    except Exception as exc:   # noqa: BLE001 — clean error, not a traceback
+        message = (f"could not resolve vehicle {vehicle!r} from "
+                   f"pod_defaults.yaml: {config.scrub(str(exc))}")
+        log(f"[deadman] status: {message}")
+        return {"state": "config_error", "vehicle": vehicle,
+                "message": message, "exit_code": 2}
+
     if pid_file.exists():
         data = _read_pid_file(pid_file)
         pid = data.get("pid")
@@ -500,7 +666,7 @@ def status(*, pid_file: Path | None = None, summary_glob: str | None = None,
                 "message": "deadman process died; the pod may still be running; "
                            "check/stop it manually", "exit_code": 1}
 
-    summary = _find_latest_summary(summary_glob or _default_summary_glob())
+    summary = _find_latest_summary(summary_glob)
     if summary is None:
         return {"state": "not_armed", "message": "no pid file, no prior summary",
                 "exit_code": 0}
@@ -531,7 +697,15 @@ def _build_parser() -> argparse.ArgumentParser:
                     "depend on any supervising process staying alive.")
     sub = p.add_subparsers(dest="subcommand", required=True)
 
+    # NOTE the asymmetry: arm/cancel default to None (and are then REJECTED by
+    # _require_vehicle) while status leaves None meaning "all vehicles".
+    # Deliberate — see _require_vehicle and status().
+    vehicle_kwargs = dict(choices=("hippocampus", "bluerov2"), default=None)
+
     arm_p = sub.add_parser("arm", help="arm the fuse (background it)")
+    arm_p.add_argument("--vehicle", **vehicle_kwargs,
+                      help="REQUIRED — which pod this fuse guards "
+                           "(hippocampus == the pre-existing lts-replication pod)")
     arm_p.add_argument("--hours", type=float, default=3.0)
     arm_p.add_argument("--retries", type=int, default=5)
     arm_p.add_argument("--spacing-sec", type=int, default=300)
@@ -542,13 +716,33 @@ def _build_parser() -> argparse.ArgumentParser:
                            "probe (for tests/offline use)")
 
     cancel_p = sub.add_parser("cancel", help="disarm a running fuse")
+    cancel_p.add_argument("--vehicle", **vehicle_kwargs,
+                         help="REQUIRED — which pod's fuse to disarm")
     cancel_p.add_argument("--pid-file", default=None)
 
     status_p = sub.add_parser("status", help="report armed/LOST/last outcome — no network")
+    status_p.add_argument("--vehicle", **vehicle_kwargs,
+                         help="optional — OMIT to report EVERY declared "
+                              "vehicle (worst result wins the exit code)")
     status_p.add_argument("--pid-file", default=None)
     status_p.add_argument("--summary-glob", default=None)
 
     return p
+
+
+def _require_vehicle(args: argparse.Namespace, parser: argparse.ArgumentParser,
+                     subcommand: str) -> None:
+    """arm/cancel take NO default vehicle. A fuse pointed at the wrong pod is
+    silently wrong for HOURS — it reports healthy while the real pod bills — so
+    the target is always stated out loud, never inherited from a default."""
+    if not args.vehicle:
+        parser.error(
+            f"{subcommand} requires an explicit --vehicle "
+            "{hippocampus,bluerov2} — there is deliberately no default, "
+            "because a fuse armed against the wrong pod looks healthy for "
+            "hours while the real pod keeps billing. 'hippocampus' is the "
+            "pre-existing lts-replication pod; 'bluerov2' is the "
+            "lts-replication-bluerov2 pod.")
 
 
 def _validate_arm_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -566,8 +760,10 @@ def _path_or_none(value: str | None) -> Path | None:
 
 def _main_arm(spec: ArmSpec) -> int:
     """Wires the REAL SIGTERM handler (active only during the sleep phase)
-    and the REAL runtime factory, then delegates to `arm()`. This is the
-    only place in the module that touches `signal.signal` or `tools.runtime`."""
+    and the REAL, VEHICLE-SCOPED runtime factory, then delegates to `arm()`.
+    This is the only place in the module that touches `signal.signal` or
+    `tools.runtime`. The factory stays LAZY — `tools.runtime(...)` is invoked
+    only when the fuse actually fires, hours later."""
     cancel_flag = {"requested": False}
 
     def _on_sigterm(signum, frame):
@@ -579,7 +775,8 @@ def _main_arm(spec: ArmSpec) -> int:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
     try:
-        summary = arm(spec, rt_factory=tools.runtime, sleep=time.sleep,
+        summary = arm(spec, rt_factory=lambda: tools.runtime(spec.vehicle),
+                     sleep=time.sleep,
                      now=time.monotonic, iso_now=_iso_now, log=_default_log,
                      cancel_requested=lambda: cancel_flag["requested"],
                      on_fire_start=_disarm_signal)
@@ -597,21 +794,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.subcommand == "arm":
+        _require_vehicle(args, parser, "arm")
         _validate_arm_args(args, parser)
         spec = ArmSpec(hours=args.hours, retries=args.retries,
                        spacing_sec=args.spacing_sec,
                        pid_file=_path_or_none(args.pid_file),
                        summary_path=_path_or_none(args.summary_path),
-                       probe_key=not args.no_probe_key)
+                       probe_key=not args.no_probe_key,
+                       vehicle=args.vehicle)
         return _main_arm(spec)
 
     if args.subcommand == "cancel":
-        result = cancel(pid_file=_path_or_none(args.pid_file))
+        _require_vehicle(args, parser, "cancel")
+        result = cancel(vehicle=args.vehicle,
+                        pid_file=_path_or_none(args.pid_file))
         print(json.dumps(result, indent=2))
         return int(result["exit_code"])
 
     if args.subcommand == "status":
-        result = status(pid_file=_path_or_none(args.pid_file),
+        result = status(vehicle=args.vehicle,
+                        pid_file=_path_or_none(args.pid_file),
                         summary_glob=args.summary_glob)
         print(json.dumps(result, indent=2))
         return int(result["exit_code"])

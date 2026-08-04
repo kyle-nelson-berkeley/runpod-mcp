@@ -17,10 +17,23 @@
 # requirements.txt changes.
 #
 # Usage:
-#   ./deadman.sh arm --hours 3.0 &   # background it; re-arm before it fires
+#   ./deadman.sh arm --vehicle hippocampus --hours 3.0 &
+#                                     # background it; re-arm before it fires
 #                                     # to extend (cancel, then a fresh arm)
-#   ./deadman.sh status               # armed / LOST / last outcome — no network
-#   ./deadman.sh cancel                # disarm before a normal stop_pod
+#   ./deadman.sh status               # ALL vehicles: armed / LOST / last
+#                                     # outcome — no network. Worst result
+#                                     # wins the exit code.
+#   ./deadman.sh status --vehicle bluerov2   # just one (flat shape)
+#   ./deadman.sh cancel --vehicle hippocampus   # disarm before a normal stop_pod
+#
+# --vehicle {hippocampus,bluerov2} picks WHICH POD the fuse guards;
+# 'hippocampus' IS the pre-existing lts-replication pod. `arm` and `cancel`
+# REQUIRE it explicitly (no default): a fuse armed against the wrong pod
+# reports healthy for hours while the real pod keeps billing. `status` takes
+# it optionally — omit it and every declared vehicle is reported, so a LOST
+# fuse on one pod can never hide behind a quiet exit-0 on the other. Each
+# vehicle's artifacts live in ITS OWN directory (hippocampus: logs/pod/;
+# bluerov2: logs/pod/bluerov2/) with identical filenames.
 #
 # CAVEAT (documented, not solved): `caffeinate -i` holds off macOS *idle*
 # sleep only for the lifetime of this process — it does NOT prevent

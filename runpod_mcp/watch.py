@@ -37,7 +37,13 @@ are the one call that bypasses `tools.*` (mirroring supervise's
 tests via a scripted fake SSH client.
 
 `watch()` never talks to the real Keychain/network; only `main()` calls
-`tools.runtime()` to build the real Runtime.
+`tools.runtime(args.vehicle)` to build the real Runtime — `--vehicle`
+(hippocampus | bluerov2, default hippocampus == the pre-existing
+lts-replication pod) selects WHICH pod is observed. Everything vehicle-scoped
+(pod_status, ssh, the default status-file path) derives from that bound
+Runtime's cfg, so the watcher never needs to know about vehicles itself. The
+single-active-job discovery guard is per-POD and stays exactly as it was: one
+job at a time on one GPU is still the tripwire.
 
 EXIT CODES (the CLI's exit IS the page — it runs as one run_in_background
 Bash task, same convention as supervise.sh):
@@ -657,6 +663,10 @@ def _build_parser() -> argparse.ArgumentParser:
                     "own summary JSON remains the authoritative terminal "
                     f"record) until it reaches a terminal state. Plateau/"
                     f"stall defaults are {_HEURISTIC_NOTE}.")
+    p.add_argument("--vehicle", choices=("hippocampus", "bluerov2"),
+                   default="hippocampus",
+                   help="which POD to observe (default hippocampus — the "
+                        "pre-existing lts-replication pod)")
     p.add_argument("--job-id", default=None,
                    help="skip discovery entirely and watch this job id "
                         "(attended use)")
@@ -706,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     spec = _spec_from_args(args, parser)
-    result = watch(tools.runtime(), spec)
+    result = watch(tools.runtime(args.vehicle), spec)
     return int(result["process_exit_code"])
 
 
