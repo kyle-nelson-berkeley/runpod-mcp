@@ -310,8 +310,14 @@ def _build_pod_payload(rt: Runtime, volume_id: str, data_center: str) -> dict:
     return guardrails.enforce_pod_payload(payload)
 
 
-def _no_gpu_recovery(cfg: dict) -> dict:
-    """Recovery recipe naming the RESOLVED pod (never a hardcoded pod name)."""
+def _no_gpu_recovery(cfg: dict, vehicle: str) -> dict:
+    """Recovery recipe naming the RESOLVED pod (never a hardcoded pod name).
+
+    Every step is EXECUTABLE AS WRITTEN: terminate_pod refuses an implicit
+    vehicle and ensure_pod defaults to hippocampus, so both must carry the
+    vehicle explicitly or an agent following this recipe gets refused (or
+    silently recovers the wrong pod).
+    """
     pod = cfg["pod_name"]
     return {
         "why": ("stopped pods do NOT reserve their GPU — this host has no free "
@@ -319,9 +325,10 @@ def _no_gpu_recovery(cfg: dict) -> dict:
                 "pod termination)"),
         "recipe": [
             "1. check stock: gpu_availability(data_center_id='<volume DC>')",
-            f"2. if stock exists: terminate_pod(confirm='terminate {pod}')"
+            f"2. if stock exists: terminate_pod(confirm='terminate {pod}', "
+            f"vehicle='{vehicle}')"
             "   [KYLE-APPROVAL-ONLY per CLAUDE.md] — the volume survives",
-            f"3. ensure_pod() for '{pod}' — recreates the pod in the SAME"
+            f"3. ensure_pod(vehicle='{vehicle}') — recreates the pod in the SAME"
             "   datacenter, attached to the same volume, zero data loss",
             "4. if the DC is dry: wait and retry, or (worst case) create a second"
             "   volume in another DC (pod_defaults datacenter_preference)",
@@ -403,7 +410,8 @@ def ensure_pod(rt: Runtime, dry_run: bool = False) -> dict:
         except api.ApiError as exc:
             if api.looks_like_no_gpu_error(str(exc)):
                 return {"status": "start_failed_no_gpu", "pod_id": pod["id"],
-                        "error": scrub(exc), "recovery": _no_gpu_recovery(cfg)}
+                        "error": scrub(exc),
+                        "recovery": _no_gpu_recovery(cfg, rt.vehicle)}
             raise
 
     # ALWAYS treat this as a possible transition-to-running: the pod may have

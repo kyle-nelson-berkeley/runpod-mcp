@@ -301,18 +301,65 @@ def test_spend_report_is_labelled_account_wide(monkeypatch):
 
 # ========================================== (g) no-GPU recovery names the pod
 
-def test_no_gpu_recovery_names_the_resolved_pod_for_bluerov2():
+def _recovery(vehicle):
     import json
-    recipe = json.dumps(tools._no_gpu_recovery(tools.runtime("bluerov2").cfg))
+    rt = tools.runtime(vehicle)
+    return json.dumps(tools._no_gpu_recovery(rt.cfg, rt.vehicle))
+
+
+def test_no_gpu_recovery_names_the_resolved_pod_for_bluerov2():
+    recipe = _recovery("bluerov2")
     assert "terminate lts-replication-bluerov2" in recipe
+    # the closing quote keeps the -bluerov2 superset from false-positiving
     assert "terminate lts-replication'" not in recipe     # not the OTHER pod
 
 
 def test_no_gpu_recovery_still_names_lts_replication_for_hippocampus():
-    import json
-    recipe = json.dumps(tools._no_gpu_recovery(tools.runtime("hippocampus").cfg))
+    recipe = _recovery("hippocampus")
     assert "terminate lts-replication" in recipe
     assert "lts-replication-bluerov2" not in recipe
+
+
+def test_no_gpu_recovery_recipe_is_executable_as_written():
+    """The wrappers REQUIRE an explicit vehicle on terminate_pod and route
+    ensure_pod by vehicle — a recipe without it is rejected (terminate) or
+    silently aimed at the wrong pod (ensure_pod)."""
+    for vehicle in ("hippocampus", "bluerov2"):
+        recipe = _recovery(vehicle)
+        assert f"vehicle='{vehicle}'" in recipe
+        assert f"ensure_pod(vehicle='{vehicle}')" in recipe
+        assert "terminate_pod(confirm=" in recipe
+    # and the recovery ensure_pod never defaults to the other arm
+    assert "ensure_pod(vehicle='hippocampus')" not in _recovery("bluerov2")
+
+
+def test_no_gpu_recovery_keeps_the_approval_gate_and_volume_note():
+    for vehicle in ("hippocampus", "bluerov2"):
+        recipe = _recovery(vehicle)
+        assert "KYLE-APPROVAL-ONLY" in recipe
+        assert "the volume survives" in recipe
+        assert "confirm-gated" in recipe
+
+
+def test_ensure_pod_no_gpu_recovery_uses_the_runtimes_own_vehicle(monkeypatch):
+    """ensure_pod must hand its OWN vehicle to the recipe, not the default."""
+    seen = {}
+    monkeypatch.setattr(tools, "_no_gpu_recovery",
+                        lambda cfg, vehicle: seen.update(cfg=cfg,
+                                                         vehicle=vehicle) or {})
+    from tests.test_tools import make_rt
+    rt = make_rt(pods=[{"id": "p2", "name": "lts-replication-bluerov2",
+                        "desiredStatus": "EXITED", "networkVolumeId": "v2"}],
+                 volumes=[{"id": "v2", "name": "bluerov2-lts",
+                           "dataCenterId": "EU-RO-1"}],
+                 vehicle="bluerov2")
+    rt.client.start_error = tools.api.ApiError(
+        "There are no longer any instances available with the requested specs",
+        status_code=500)
+    out = tools.ensure_pod(rt)
+    assert out["status"] == "start_failed_no_gpu"
+    assert seen["vehicle"] == "bluerov2"
+    assert seen["cfg"]["pod_name"] == "lts-replication-bluerov2"
 
 
 # ======================================= (h) volumes stay by-NAME, never by id

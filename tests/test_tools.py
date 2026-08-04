@@ -127,7 +127,7 @@ def make_rt(pods=None, volumes=None, ssh_results=None, gpu=None,
             vehicle="hippocampus"):
     cfg = merged_cfg(vehicle)
     cfg["ssh_identity"] = "~/.ssh/id_ed25519"
-    rt = tools.Runtime(cfg=cfg,
+    rt = tools.Runtime(cfg=cfg, vehicle=vehicle,   # keep .vehicle and cfg in sync
                        client=FakeClient(pods, volumes),
                        sshc=FakeSSH(ssh_results),
                        sleep=lambda s: None,
