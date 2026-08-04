@@ -14,6 +14,7 @@ import pytest
 
 from runpod_mcp import config, guardrails, jobs, ssh, tools, training
 from runpod_mcp import supervise
+from tests.conftest import merged_cfg
 from tests.test_tools import FakeSSH
 
 
@@ -69,7 +70,7 @@ class RaisingRsyncSSH(RecordingSSH):
 
 
 def _make_rt(calls, ssh_results=None, local_log_dir=None, sshc=None):
-    cfg = config.load_defaults()
+    cfg = merged_cfg()
     cfg["ssh_identity"] = "~/.ssh/id_ed25519"
     if local_log_dir is not None:
         cfg["local_log_dir"] = local_log_dir

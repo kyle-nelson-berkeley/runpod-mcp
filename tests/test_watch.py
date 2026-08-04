@@ -18,6 +18,7 @@ import pytest
 
 from runpod_mcp import config, jobs, ssh, tools
 from runpod_mcp import watch
+from tests.conftest import merged_cfg
 from tests.test_tools import FakeSSH, ok
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "watch"
@@ -68,7 +69,7 @@ def _guard_no_stop_or_terminate(monkeypatch):
 
 
 def _make_rt(ssh_results=None, local_log_dir=None, sshc=None):
-    cfg = config.load_defaults()
+    cfg = merged_cfg()
     cfg["ssh_identity"] = "~/.ssh/id_ed25519"
     if local_log_dir is not None:
         cfg["local_log_dir"] = local_log_dir

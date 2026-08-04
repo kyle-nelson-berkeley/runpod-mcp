@@ -1,8 +1,11 @@
 """Cost/safety guardrails — enforced in code, not prose.
 
 Rules (from the consensus plan):
-  - ONE pod max, named per pod_defaults.yaml; refuse if any other pod exists.
-  - RTX 4090 only, exactly 1 GPU, SECURE cloud, interruptible FORCED false.
+  - ONE pod PER DECLARED VEHICLE; any pod whose name is not declared in
+    pod_defaults.yaml `vehicles:` is refused (bringing up one vehicle must
+    tolerate the other vehicle's pod, and nothing else).
+  - RTX 4090 only, exactly 1 GPU, SECURE cloud, interruptible FORCED false
+    (per pod — unchanged by the two-vehicle split).
   - A network volume is required (data survives termination).
   - terminate_pod needs the verbatim confirm string "terminate <pod_name>".
   - One detached job at a time unless force=True (1 GPU; log-dir attribution
@@ -17,14 +20,22 @@ class GuardrailError(RuntimeError):
     """A guardrail refused the operation. Nothing was sent to the API."""
 
 
-def assert_only_pod(pods: list, pod_name: str) -> None:
-    """Refuse to operate while any pod other than ours exists on the account."""
-    others = [p for p in pods if p.get("name") != pod_name]
+def assert_only_pod(pods: list, allowed_names) -> None:
+    """Refuse to operate while any pod we did NOT declare exists on the account.
+
+    `allowed_names` is the union of every vehicle's pod_name
+    (config.declared_pod_names) — so ensure_pod for one vehicle tolerates the
+    other vehicle's pod, and only genuinely-foreign pods are refused.
+    """
+    allowed = set(allowed_names)
+    others = [p for p in pods if p.get("name") not in allowed]
     if others:
         names = ", ".join(f"{p.get('name')!r} (id={p.get('id')})" for p in others)
+        allowed_txt = ", ".join(repr(n) for n in sorted(allowed))
         raise GuardrailError(
-            f"Account has pod(s) other than '{pod_name}': {names}. "
-            "One-pod guardrail: resolve these in the RunPod console first.")
+            f"Account has undeclared pod(s): {names}. Allowed (one per "
+            f"declared vehicle): {allowed_txt}. Resolve these in the RunPod "
+            "console first, or declare the vehicle in pod_defaults.yaml.")
 
 
 def enforce_pod_payload(payload: dict) -> dict:

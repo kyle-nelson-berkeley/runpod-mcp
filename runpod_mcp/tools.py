@@ -7,6 +7,11 @@ Design (consensus plan):
   - STATELESS: "the pod" = whatever GET /pods returns matching the configured
     name — the console and the MCP always agree. Only local state: a 60s-TTL
     (host, port) connection cache.
+  - PER-VEHICLE: every function takes a Runtime bound to ONE vehicle
+    (hippocampus | bluerov2), each with its own pod, network volume,
+    known_hosts file and local log dir. runtime(vehicle) is a small registry;
+    the default is DETERMINISTIC hippocampus (the pre-existing
+    lts-replication pod) — never a "sole running pod" heuristic.
   - Guardrails protect money, not the pod filesystem.
   - dry_run paths return the exact would-be payloads without mutating.
 """
@@ -17,8 +22,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import api, guardrails, jobs, ssh, training
-from .config import (REPO_ROOT, ConfigError, fetch_api_key, load_defaults,
-                     read_ssh_public_key, scrub)
+from .config import (REPO_ROOT, ConfigError, declared_pod_names, fetch_api_key,
+                     load_defaults, merged_vehicle_cfg, read_ssh_public_key,
+                     scrub)
 
 # Env for pod_setup.sh's FIRST-EVER detached run (only ever pasted
 # interactively before): apt must never prompt, IsaacSim must not stop on
@@ -44,12 +50,42 @@ class ToolError(RuntimeError):
     """Refused/failed tool call; message is scrubbed and actionable."""
 
 
+# Two independent axes, deliberately NOT conflated:
+#   * launch_training's `vehicle` = which PHYSICAL MODEL is trained (DR tables,
+#     checkout marker gates) — curee | bluerov2, unchanged.
+#   * runtime()'s vehicle        = which POD/VOLUME the job runs on.
+# This map is the explicit derivation from the first to the second.
+TRAINING_VEHICLE_TO_POD = {"curee": "hippocampus", "bluerov2": "bluerov2"}
+
+
 class Runtime:
-    """Lazy holder for config + API/SSH clients. Tests inject fakes."""
+    """Lazy holder for one vehicle's config + API/SSH clients. Tests inject fakes.
+
+    cfg is always a MERGED per-vehicle view (config.merged_vehicle_cfg), never
+    the raw pod_defaults.yaml — raw has no top-level pod_name.
+    """
 
     def __init__(self, cfg=None, client=None, sshc=None, sleep=time.sleep,
-                 gpu_types=api.gpu_types, ssh_pubkey=None):
-        self.cfg = cfg or load_defaults()
+                 gpu_types=api.gpu_types, ssh_pubkey=None,
+                 vehicle: str = "hippocampus", allowed_pod_names=None):
+        self.vehicle = vehicle
+        if cfg is None:
+            raw = load_defaults()
+            self.cfg = merged_vehicle_cfg(raw, vehicle)
+            declared = declared_pod_names(raw)
+        else:
+            if "pod_name" not in cfg:
+                raise ToolError(
+                    "Runtime(cfg=...) needs a MERGED per-vehicle config view "
+                    "(no 'pod_name' key found). Build it with "
+                    "config.merged_vehicle_cfg(config.load_defaults(), "
+                    "'<vehicle>') — in tests use the merged_cfg() helper in "
+                    "tests/conftest.py. The raw pod_defaults.yaml keeps "
+                    "pod_name under vehicles:<vehicle>.")
+            self.cfg = cfg
+            declared = {cfg["pod_name"]}
+        self.allowed_pod_names = (set(allowed_pod_names)
+                                  if allowed_pod_names is not None else declared)
         self._client = client
         self._ssh = sshc
         self.sleep = sleep
@@ -77,14 +113,27 @@ class Runtime:
         return self._ssh_pubkey
 
 
-_runtime: Runtime | None = None
+_runtimes: dict[str, Runtime] = {}
 
 
-def runtime() -> Runtime:
-    global _runtime
-    if _runtime is None:
-        _runtime = Runtime()
-    return _runtime
+def runtime(vehicle: str = "hippocampus") -> Runtime:
+    """The (cached) Runtime for one vehicle's pod + volume.
+
+    The default is DETERMINISTIC — 'hippocampus', the pre-existing
+    lts-replication pod — so grandfathered `tools.runtime()` calls in the
+    chain scripts keep resolving exactly where they always did. There is
+    deliberately no "whichever pod happens to be running" heuristic.
+    """
+    if vehicle not in _runtimes:
+        vehicles = (load_defaults().get("vehicles") or {})
+        if vehicle not in vehicles:
+            raise ToolError(
+                f"unknown vehicle {vehicle!r} — pod_defaults.yaml declares: "
+                f"{', '.join(sorted(vehicles))}. Pass one of those "
+                "('hippocampus' is the default and means the lts-replication "
+                "pod), or add the vehicle to pod_defaults.yaml `vehicles:`.")
+        _runtimes[vehicle] = Runtime(vehicle=vehicle)
+    return _runtimes[vehicle]
 
 
 # ------------------------------------------------------------------- helpers
@@ -200,7 +249,10 @@ def spend_report(rt: Runtime) -> dict:
     pods_billing = rt.client.billing_pods() or []
     vol_billing = rt.client.billing_network_volumes()
     pod_usd = total(pods_billing)
-    out = {"pod_compute_usd": pod_usd, "budget_usd": rt.cfg["budget_usd"]}
+    # RunPod billing has no per-pod filter — this is the WHOLE account. Said
+    # out loud so a two-vehicle world never double-counts it as per-vehicle.
+    out = {"pod_compute_usd": pod_usd, "budget_usd": rt.cfg["budget_usd"],
+           "scope": "account-wide (all vehicles)"}
     if vol_billing is None:
         out["coverage"] = ("compute only, excludes ~$4.20/mo volume storage "
                            "(billing/networkvolumes endpoint absent)")
@@ -258,27 +310,32 @@ def _build_pod_payload(rt: Runtime, volume_id: str, data_center: str) -> dict:
     return guardrails.enforce_pod_payload(payload)
 
 
-NO_GPU_RECOVERY = {
-    "why": ("stopped pods do NOT reserve their GPU — this host has no free "
-            "4090 right now; the network volume is untouched (data survives "
-            "pod termination)"),
-    "recipe": [
-        "1. check stock: gpu_availability(data_center_id='<volume DC>')",
-        "2. if stock exists: terminate_pod(confirm='terminate lts-replication')"
-        "   [KYLE-APPROVAL-ONLY per CLAUDE.md] — the volume survives",
-        "3. ensure_pod() — recreates the pod in the SAME datacenter, attached"
-        "   to the same volume, zero data loss",
-        "4. if the DC is dry: wait and retry, or (worst case) create a second"
-        "   volume in another DC (pod_defaults datacenter_preference)",
-    ],
-    "note": "terminate stays confirm-gated — never automatic",
-}
+def _no_gpu_recovery(cfg: dict) -> dict:
+    """Recovery recipe naming the RESOLVED pod (never a hardcoded pod name)."""
+    pod = cfg["pod_name"]
+    return {
+        "why": ("stopped pods do NOT reserve their GPU — this host has no free "
+                "4090 right now; the network volume is untouched (data survives "
+                "pod termination)"),
+        "recipe": [
+            "1. check stock: gpu_availability(data_center_id='<volume DC>')",
+            f"2. if stock exists: terminate_pod(confirm='terminate {pod}')"
+            "   [KYLE-APPROVAL-ONLY per CLAUDE.md] — the volume survives",
+            f"3. ensure_pod() for '{pod}' — recreates the pod in the SAME"
+            "   datacenter, attached to the same volume, zero data loss",
+            "4. if the DC is dry: wait and retry, or (worst case) create a second"
+            "   volume in another DC (pod_defaults datacenter_preference)",
+        ],
+        "note": "terminate stays confirm-gated — never automatic",
+    }
 
 
 def ensure_pod(rt: Runtime, dry_run: bool = False) -> dict:
     cfg = rt.cfg
     pods = rt.client.list_pods()
-    guardrails.assert_only_pod(pods, cfg["pod_name"])   # one-pod max
+    # one pod per DECLARED vehicle: the union, so bringing up this vehicle
+    # tolerates the other vehicle's pod already running
+    guardrails.assert_only_pod(pods, rt.allowed_pod_names)
     pod = _find_pod(rt, pods)
 
     # ---- network volume first (survives termination; pins the DC) ----------
@@ -346,7 +403,7 @@ def ensure_pod(rt: Runtime, dry_run: bool = False) -> dict:
         except api.ApiError as exc:
             if api.looks_like_no_gpu_error(str(exc)):
                 return {"status": "start_failed_no_gpu", "pod_id": pod["id"],
-                        "error": scrub(exc), "recovery": NO_GPU_RECOVERY}
+                        "error": scrub(exc), "recovery": _no_gpu_recovery(cfg)}
             raise
 
     # ALWAYS treat this as a possible transition-to-running: the pod may have

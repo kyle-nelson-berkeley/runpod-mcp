@@ -16,6 +16,19 @@ REPO_ROOT = MCP_ROOT.parent                      # learning-to-swim-replication/
 sys.path.insert(0, str(MCP_ROOT))
 
 
+def merged_cfg(vehicle: str = "hippocampus") -> dict:
+    """The flat per-vehicle config a Runtime expects when a test injects cfg.
+
+    tools.Runtime(cfg=...) takes a MERGED view (config.merged_vehicle_cfg),
+    not the raw pod_defaults.yaml — raw has no top-level pod_name. Fixture
+    builders across the suite go through this helper. Default is hippocampus:
+    the pre-existing lts-replication pod, so migrated fixtures keep their
+    original values.
+    """
+    from runpod_mcp import config as _config          # import-time-safe (no key)
+    return _config.merged_vehicle_cfg(_config.load_defaults(), vehicle)
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "live: needs the real Keychain key / network; deselected by default"

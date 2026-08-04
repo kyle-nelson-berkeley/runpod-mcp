@@ -9,9 +9,15 @@
 # guarantees that floor at scheduling time) on an Ubuntu 22.04 image.
 # NGC fallback image (nvcr.io/nvidia/isaac-sim:4.5.0) is a manual swap — it
 # has no sshd; see README.md before ever switching.
+#
+# SHAPE: everything at the top level is SHARED by every vehicle; the five keys
+# that must differ per vehicle live under `vehicles:` and are overlaid onto the
+# shared block by config.merged_vehicle_cfg(raw, vehicle). Runtimes are built
+# per vehicle (tools.runtime("hippocampus"|"bluerov2")); "hippocampus" is the
+# deterministic default and resolves to the pre-existing lts-replication
+# pod + volume EXACTLY as this file did before the vehicles map existed.
 # =============================================================================
 
-pod_name: lts-replication
 cloud_type: SECURE
 gpu_type_ids: ["NVIDIA GeForce RTX 4090"]
 gpu_count: 1
@@ -23,22 +29,17 @@ volume_mount_path: /workspace
 ports: ["22/tcp"]
 support_public_ip: true
 
-# Network volume: survives pod termination; pins the pod to one datacenter.
-network_volume_name: lts-replication
+# Network volume size. Each vehicle gets its OWN volume (name below); a volume
+# survives pod termination and pins its pod to one datacenter. Volumes are
+# resolved BY NAME with auto-create — never by a pinned id.
 network_volume_gb: 60
-# Ordered DC candidates for volume creation (first with 4090 stock wins).
-# Live-verified 2026-07-03 via unauth GraphQL: EU-RO-1 / US-TX-3 / EUR-IS-1
-# show 4090 stock; US-KS-2 / US-GA-2 return null. EU-RO-1 first — the
-# account's existing 60 GB volume lives there.
-datacenter_preference: ["EU-RO-1", "US-TX-3", "EUR-IS-1", "US-KS-2", "US-GA-2"]
 
-# Local paths
+# Local paths (shared)
 ssh_identity: ~/.ssh/id_ed25519
-known_hosts_file: ~/.ssh/known_hosts_runpod
-local_log_dir: logs/pod       # relative to repo root; gitignored
 
-# Cost guardrails (informational — the hard stop is RunPod's account limit)
-budget_usd: 50
+# Cost guardrails (informational — the hard stop is RunPod's PREPAID CREDIT
+# balance, not this number)
+budget_usd: 174
 idle_minutes: 60              # idle_watchdog stops the pod after this
 
 # Wall-clock ceilings (seconds) for detached jobs — job_wrapper.sh `timeout`
@@ -55,3 +56,41 @@ poll:
   interval_sec: 10
 
 min_driver_version: "535.129.03"
+
+# =============================================================================
+# Per-vehicle overlay. Exactly these five keys differ per vehicle; everything
+# above is shared. config.merged_vehicle_cfg(raw, vehicle) produces the flat
+# view the tools consume, and config.declared_pod_names(raw) is the union that
+# guardrails.assert_only_pod() accepts (so bringing up one vehicle's pod does
+# not trip over the other vehicle's pod already running).
+#
+# datacenter_preference: ordered DC candidates for VOLUME CREATION (first with
+# 4090 stock wins). Live-verified 2026-07-03 via unauth GraphQL: EU-RO-1 /
+# US-TX-3 / EUR-IS-1 show 4090 stock; US-KS-2 / US-GA-2 return null. EU-RO-1
+# first — the account's existing 60 GB hippocampus volume lives there. The two
+# vehicles' volumes have NO co-location requirement; bluerov2 keeps the same
+# ordered list purely so a first bring-up has a fallback if EU-RO-1 is dry.
+#
+# known_hosts_file is PER VEHICLE on purpose: ensure_pod() calls
+# ssh.truncate_known_hosts() on every transition-to-running, so a shared file
+# would let one vehicle's bring-up wipe the OTHER vehicle's live host keys
+# mid-run.
+# =============================================================================
+vehicles:
+  # The original (and default) arm — this pod + volume already exist and hold
+  # every campaign's data. These five values reproduce the pre-vehicles config
+  # exactly; changing them breaks backward compatibility.
+  hippocampus:
+    pod_name: lts-replication
+    network_volume_name: lts-replication
+    datacenter_preference: ["EU-RO-1", "US-TX-3", "EUR-IS-1", "US-KS-2", "US-GA-2"]
+    known_hosts_file: ~/.ssh/known_hosts_runpod
+    local_log_dir: logs/pod           # relative to repo root; gitignored
+
+  # New, distinct pod + volume (neither exists yet — ensure_pod creates both).
+  bluerov2:
+    pod_name: lts-replication-bluerov2
+    network_volume_name: bluerov2-lts
+    datacenter_preference: ["EU-RO-1", "US-TX-3", "EUR-IS-1", "US-KS-2", "US-GA-2"]
+    known_hosts_file: ~/.ssh/known_hosts_runpod_bluerov2
+    local_log_dir: logs/pod/bluerov2  # relative to repo root; gitignored

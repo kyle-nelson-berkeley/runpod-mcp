@@ -31,10 +31,35 @@ def scrub(text) -> str:
 
 
 def load_defaults(path: Path | None = None) -> dict:
-    """Load the committed pod spec (no secrets live there)."""
+    """Load the committed pod spec RAW (no secrets live there).
+
+    Raw = shared top-level keys + the `vehicles:` map. Tools consume the
+    per-vehicle FLAT view from merged_vehicle_cfg(), never this dict directly.
+    """
     p = Path(path) if path else DEFAULTS_PATH
     with open(p) as fh:
         return yaml.safe_load(fh)
+
+
+def merged_vehicle_cfg(raw: dict, vehicle: str) -> dict:
+    """Flatten the raw spec for one vehicle: shared keys + that vehicle's overlay.
+
+    The `vehicles` map itself is dropped — the result is exactly the flat shape
+    the tools consumed before per-vehicle scoping existed.
+    """
+    vehicles = raw.get("vehicles") or {}
+    if vehicle not in vehicles:
+        raise ConfigError(
+            f"unknown vehicle {vehicle!r} — pod_defaults.yaml declares: "
+            f"{', '.join(sorted(vehicles))}")
+    merged = {k: v for k, v in raw.items() if k != "vehicles"}
+    merged.update(vehicles[vehicle])
+    return merged
+
+
+def declared_pod_names(raw: dict) -> set:
+    """Every pod name this config declares — the union guardrails allow."""
+    return {v["pod_name"] for v in (raw.get("vehicles") or {}).values()}
 
 
 def fetch_api_key(run=subprocess.run) -> str:

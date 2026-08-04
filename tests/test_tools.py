@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from runpod_mcp import config, guardrails, jobs, tools, training
-from tests.conftest import REPO_ROOT
+from tests.conftest import REPO_ROOT, merged_cfg
 
 POD_RUNNING = {
     "id": "on2ghkedz0vbjr", "name": "lts-replication", "desiredStatus": "RUNNING",
@@ -123,8 +123,9 @@ def fail(stderr="x", rc=1):
     return subprocess.CompletedProcess([], rc, stdout="", stderr=stderr)
 
 
-def make_rt(pods=None, volumes=None, ssh_results=None, gpu=None):
-    cfg = config.load_defaults()
+def make_rt(pods=None, volumes=None, ssh_results=None, gpu=None,
+            vehicle="hippocampus"):
+    cfg = merged_cfg(vehicle)
     cfg["ssh_identity"] = "~/.ssh/id_ed25519"
     rt = tools.Runtime(cfg=cfg,
                        client=FakeClient(pods, volumes),
@@ -512,8 +513,10 @@ def test_spend_report_sums_and_includes_volume_storage():
     assert out["pod_compute_usd"] == 0.56
     assert out["network_volume_usd"] == 0.01
     assert out["total_usd"] == 0.57
-    assert out["budget_usd"] == 50
+    assert out["budget_usd"] == 174
     assert out["coverage"] == "compute + network volume storage"
+    # billing has no per-pod filter — never read as one vehicle's spend
+    assert out["scope"] == "account-wide (all vehicles)"
 
 
 def test_spend_report_labels_missing_volume_billing():

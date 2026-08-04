@@ -5,22 +5,55 @@ from runpod_mcp import guardrails as g
 
 
 POD = {"id": "p1", "name": "lts-replication"}
+BLUE = {"id": "p2", "name": "lts-replication-bluerov2"}
 OTHER = {"id": "px", "name": "someone-elses-pod"}
 
+BOTH = {"lts-replication", "lts-replication-bluerov2"}
 
-# ------------------------------------------------------------- one-pod max
+
+# ----------------------------------------- one pod PER DECLARED VEHICLE max
 
 def test_only_pod_ok_with_empty_account():
-    g.assert_only_pod([], "lts-replication")
+    g.assert_only_pod([], {"lts-replication"})
 
 
 def test_only_pod_ok_with_our_pod():
-    g.assert_only_pod([POD], "lts-replication")
+    g.assert_only_pod([POD], {"lts-replication"})
 
 
 def test_only_pod_refuses_foreign_pod():
     with pytest.raises(g.GuardrailError, match="someone-elses-pod"):
-        g.assert_only_pod([POD, OTHER], "lts-replication")
+        g.assert_only_pod([POD, OTHER], {"lts-replication"})
+
+
+def test_only_pod_allows_every_declared_vehicle_pod():
+    """Two arms = two declared pods; neither is 'foreign' to the other."""
+    g.assert_only_pod([POD, BLUE], BOTH)
+
+
+def test_only_pod_refuses_a_declared_pod_missing_from_the_allowed_set():
+    with pytest.raises(g.GuardrailError, match="lts-replication-bluerov2"):
+        g.assert_only_pod([POD, BLUE], {"lts-replication"})
+
+
+def test_only_pod_error_lists_the_allowed_union():
+    with pytest.raises(g.GuardrailError) as exc:
+        g.assert_only_pod([OTHER], BOTH)
+    msg = str(exc.value)
+    assert "someone-elses-pod" in msg
+    assert "lts-replication" in msg and "lts-replication-bluerov2" in msg
+
+
+def test_only_pod_names_every_offender():
+    extra = {"id": "py", "name": "another-stray"}
+    with pytest.raises(g.GuardrailError) as exc:
+        g.assert_only_pod([POD, OTHER, extra], BOTH)
+    msg = str(exc.value)
+    assert "someone-elses-pod" in msg and "another-stray" in msg
+
+
+def test_only_pod_accepts_any_collection_of_names():
+    g.assert_only_pod([POD, BLUE], ["lts-replication", "lts-replication-bluerov2"])
 
 
 # --------------------------------------------------------- payload enforcer
