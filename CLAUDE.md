@@ -1,6 +1,6 @@
 # runpod-mcp — CLAUDE.md
 
-*Last updated: 2026-07-06 · Owner: Kyle*
+*Last updated: 2026-08-04 · Owner: Kyle*
 
 Project context, operating rules, and the runbook-day → tool map live in the
 **root [CLAUDE.md](../CLAUDE.md)** — read that first. This file covers only
@@ -15,8 +15,24 @@ training jobs (`launch_training`, `run_job`, `job_status`), BlueROV2
 patching (`apply_bluerov_patches`, `axis_sanity_sweep`), plus
 `sync_logs` / `spend_report` / `pod_status` / `gpu_availability` /
 `exec_on_pod`. Cost guardrails are enforced **in code**, not by convention:
-one pod max, RTX 4090 only, Secure Cloud, never interruptible, network
-volume required, idle watchdog, per-job `auto_stop`.
+one pod PER VEHICLE (unknown pod names refused), RTX 4090 only, Secure
+Cloud, never interruptible, network volume required, idle watchdog, per-job
+`auto_stop`.
+
+**Two-vehicle scoping (2026-08-04):** the server manages TWO pods+volumes —
+`hippocampus` (== the original `lts-replication` pod + `lts-replication`
+volume; every default resolves here, so bare calls behave exactly as before)
+and `bluerov2` (`lts-replication-bluerov2` + volume `bluerov2-lts`,
+auto-created by name on first bring-up). Every tool takes `vehicle=`
+(default `hippocampus`); `stop_pod`/`terminate_pod` REQUIRE it explicitly;
+`launch_training` derives it from its training vehicle
+(`tools.TRAINING_VEHICLE_TO_POD`: curee→hippocampus, bluerov2→bluerov2 —
+the training axis and the pod-routing axis are deliberately separate);
+`apply_bluerov_patches`/`axis_sanity_sweep` are bluerov2-pod by nature.
+Per-vehicle config lives under `vehicles:` in `pod_defaults.yaml` (pod/volume
+names, DC preference, known_hosts file, `local_log_dir` — hippocampus keeps
+`logs/pod`, bluerov2 gets `logs/pod/bluerov2`). `spend_report` is
+account-wide (all vehicles) — never attribute its total to one arm.
 
 ## B · Why it exists
 
@@ -72,10 +88,16 @@ zero logic duplication.
     `timeout --kill-after` ceiling. If SSH is hung, that capture can delay the
     force-stop up to the rsync timeout; the stop still always follows (bounded,
     never unbounded) and the pod-side idle watchdog is the hard backstop.
-- **The durable JSON summary is the recovery contract** (`logs/pod/
-  supervise-<job_id>.json`): a later session reads it to confirm whether the
-  pod was stopped, so *safety never depends on the completion notification
-  landing*.
+- **The durable JSON summary is the recovery contract**
+  (`supervise-<job_id>.json` in the vehicle's log dir — `logs/pod/` for
+  hippocampus, `logs/pod/bluerov2/` for bluerov2): a later session reads it
+  to confirm whether the pod was stopped, so *safety never depends on the
+  completion notification landing*.
+- **Pod routing:** `--training <vehicle>` derives the pod via
+  `TRAINING_VEHICLE_TO_POD` (an explicit `--vehicle` that conflicts is
+  refused at argparse); `--job-name` mode defaults to hippocampus — pass
+  `--vehicle bluerov2` to supervise a bluerov2-pod job. The summary records
+  the resolved `pod_vehicle`.
 - **Liveness caveats (documented, not solved):** `supervise.sh` wraps in
   `caffeinate -i`, which holds off *idle* sleep only — it does **not** stop
   clamshell/lid-close sleep on battery. And whether a `run_in_background`
@@ -99,7 +121,8 @@ console blocks into a full metric series (iteration/total, mean reward,
 value/surrogate/entropy losses — extending the `latest_reward_line` idea in
 `jobs.status`), snapshots a LISTING of the job dir (names/sizes/mtimes — never
 downloads weights), prints one compact status line per interval, and maintains
-a JSON status file (`--status-path`, default `logs/pod/watch-<job_id>.json`).
+a JSON status file (`--status-path`, default `watch-<job_id>.json` in the
+vehicle's log dir; `--vehicle` selects the pod, default hippocampus).
 
 - **The exit IS the page** (same idiom as `supervise.sh`), with distinct
   codes: **0** job completed OK · **3** plateau detected (exits at DETECTION
@@ -128,3 +151,15 @@ a JSON status file (`--status-path`, default `logs/pod/watch-<job_id>.json`).
   defaults are **heuristics derived from (and tested against) the same
   captured fixtures** — a circularity we state rather than paper over.
   Treat the first live run as the real acceptance test.
+
+### The `deadman` CLI — per-vehicle since 2026-08-04
+
+`deadman.sh arm`/`cancel` now REQUIRE an explicit `--vehicle` (a fuse is a
+fire-and-forget stop action — a wrong implicit vehicle would be silently
+wrong for hours); `status` takes it optionally and with NO `--vehicle`
+reports ALL declared vehicles with worst-exit-code-wins (a LOST or
+stop_failed fuse on EITHER arm exits 1 — one arm's trouble can never hide
+behind the other's clean report). Artifacts live in the vehicle's log dir
+(filenames unchanged: `deadman.pid`, `deadman-<ts>.json` — hippocampus keeps
+`logs/pod/`, so pre-refactor summaries stay visible); one armed fuse per
+vehicle. Usage: `./deadman.sh arm --vehicle hippocampus --hours 3.0 &`.

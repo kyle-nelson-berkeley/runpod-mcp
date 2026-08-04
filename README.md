@@ -13,20 +13,25 @@ here with cost guardrails in code.
                                         └── runpod_mcp/
                                             config.py     Keychain key fetch + rpa_ scrubber
                                             api.py        REST v1 (pods/volumes/billing) + unauth GraphQL gpuTypes
-                                            guardrails.py one-pod max · 4090-only · no spot · volume required · confirm gate
+                                            guardrails.py one-pod-per-vehicle (unknown refused) · 4090-only · no spot · volume required · confirm gate
                                             ssh.py        hardened ssh/scp/rsync; known_hosts_runpod; 60s conn cache
                                             jobs.py       detached jobs: /workspace/jobs/<id>/{cmd.sh,pid,out.log,exit_code,meta.json}
                                             training.py   DR tables (RUNBOOK/yaml-cross-checked) + verbatim train cmd
                                             supervise.py  Mac-side background CLI: launch→poll→pull→sync→spend→stop (reuses tools.*)
                                             watch.py      Mac-side ADVISORY observation CLI: discover job→tail out.log→parse metrics→page on plateau/failure/stall (read-only; never stops pods)
                                             remote/       job_wrapper.sh · idle_watchdog.sh · apply_bluerov2_patch.py
+                                            deadman.py    Mac-side stop-pod fuse: arm --vehicle → sleep → stop with retries (per-vehicle pid/summaries)
 supervise.sh → caffeinate -i wrapper around  python -m runpod_mcp.supervise
 watch.sh     → caffeinate -i wrapper around  python -m runpod_mcp.watch   (live-pod behavior UNVERIFIED — fixture/mock-verified only; see CLAUDE.md §D)
+deadman.sh   → caffeinate -i wrapper around  python -m runpod_mcp.deadman (arm/cancel REQUIRE --vehicle; bare status reports all vehicles)
 ```
 
-- **Stateless**: "the pod" = whatever `GET /pods` returns named
-  `lts-replication`; console and MCP always agree. Only local state: a
-  60-second (host, port) cache.
+- **Stateless & per-vehicle**: "the pod" = whatever `GET /pods` returns
+  matching the selected vehicle's configured name (`hippocampus` →
+  `lts-replication`, `bluerov2` → `lts-replication-bluerov2`; every tool's
+  `vehicle` param defaults to hippocampus, `stop_pod`/`terminate_pod` require
+  it explicitly); console and MCP always agree. Only local state: a
+  60-second (host, port) cache per vehicle Runtime.
 - **Async jobs**: one SSH call runs `setsid bash job_wrapper.sh <dir> <pod_id>
   <ceiling> <auto_stop>`; state lives on the network volume, so it survives
   MCP restarts, Mac sleep, and pod stop. `timeout --kill-after` enforces
@@ -39,9 +44,12 @@ watch.sh     → caffeinate -i wrapper around  python -m runpod_mcp.watch   (liv
   disk wipes on stop). Every 5 min: no live job pid + no sshd session +
   `/workspace/.keepalive` older than 60 min → `runpodctl stop pod`.
   `touch /workspace/.keepalive` is the manual-session escape hatch.
-- **Guardrails are code**: one pod max, RTX 4090 ×1, SECURE, interruptible
-  forced false, network volume required, `terminate_pod` needs the verbatim
-  string `terminate lts-replication`, one job at a time absent `force`.
+- **Guardrails are code**: one pod per declared vehicle (any other pod name
+  on the account is refused), RTX 4090 ×1, SECURE, interruptible forced
+  false, network volume required, `terminate_pod` needs an explicit
+  `vehicle` plus the verbatim string `terminate <that vehicle's pod_name>`
+  (e.g. `terminate lts-replication`), one job at a time per pod absent
+  `force`.
 
 ## Setup
 
@@ -107,17 +115,19 @@ supervise.sh --training curee --dr DR_0 --seed 1 \
     [--sync-subdir rsl_rl/warpauv_direct] [--summary-path PATH]
 
 # generic job — --sync-subdir REQUIRED (pass 'none' to skip the analysis sync;
-# the job-dir pull always happens)
+# the job-dir pull always happens); --vehicle routes the pod (default
+# hippocampus; --training mode derives it from the training vehicle instead)
 supervise.sh --job-name eval --command "…" --workdir /workspace \
-    --sync-subdir <dir|none> [--max-runtime-sec N]
+    --sync-subdir <dir|none> [--max-runtime-sec N] [--vehicle bluerov2]
 ```
 
 Money-safety: the poll loop has exactly two exits — normal completion →
 `stop_pod`; or `--max-wait` (always finite) elapsed while still `running` →
 force-stop + non-zero exit + `force_stopped` summary flag. A launch *refusal*
-→ no stop (fix and retry), exit 2. The `logs/pod/supervise-<job_id>.json`
-summary is the recovery contract (a later session reconciles stop state from
-it). Liveness caveats: `caffeinate -i` guards idle sleep but not lid-close;
+→ no stop (fix and retry), exit 2. The `supervise-<job_id>.json` summary in
+the vehicle's log dir (`logs/pod/` hippocampus, `logs/pod/bluerov2/`
+bluerov2) is the recovery contract (a later session reconciles stop state
+from it). Liveness caveats: `caffeinate -i` guards idle sleep but not lid-close;
 `run_in_background` survival across WarmLifecycle reaping is unverified — the
 pod-side idle watchdog + job `timeout` ceiling are the guaranteed backstop.
 
