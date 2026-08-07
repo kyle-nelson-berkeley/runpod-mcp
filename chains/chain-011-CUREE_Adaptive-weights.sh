@@ -183,7 +183,7 @@ REMOTE_JSONL_DIR="/workspace/IsaacLab/logs/rsl_rl/warpauv_direct"
 PROBE_JSONL_REMOTE="$REMOTE_JSONL_DIR/adapt_011_probe.jsonl"
 PROBE_JSONL_LOCAL="$RUNDIRS_LOCAL/adapt_011_probe.jsonl"
 
-# Pinned externally (runbook/HANDOFF-experiment-G.md 1.7) — the play_video
+# Pinned externally (archive/runbook/HANDOFF-experiment-G.md 1.7) — the play_video
 # port-bug fix's committed sha256.
 PLAY_ROLLOUT_EVAL_SHA="9caee847f11484c0b63bbd6d039efb3944d65b2e0f85845513d841bca338d486"
 
