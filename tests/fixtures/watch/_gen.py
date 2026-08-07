@@ -1,10 +1,33 @@
-"""One-off generator for synthetic watch fixtures. Not a test file itself —
-run manually to (re)produce the committed .log fixtures in this directory.
+"""Generator AND pin for the two SYNTHETIC watch fixtures in this directory.
+Not a test file itself.
+
+  python _gen.py           CHECK mode (the default): render both fixtures in
+                           memory and byte-compare them against the committed
+                           .log files. Exit 0 when every fixture matches; exit
+                           1 with a per-file drift message when one does not.
+  python _gen.py --write   Rewrite the .log files from the generators. Only
+                           needed when a generator is deliberately changed.
+
+Check mode is what makes this a pin rather than a one-off script: the same
+byte-identity is asserted inline by tests/test_watch.py, so a hand-edited
+fixture is caught by the suite, not just by whoever remembers to run this.
+All paths resolve from THIS FILE's directory, so both modes behave
+identically no matter what the current working directory is.
+
+Only two of this directory's .log fixtures are generated here —
+flattened_tail.log and two_iter_block.log. converging_200iters.log is REAL
+captured pod output and the cuda_oom / traceback fixtures were written by
+hand; none of those three has a generator, and none is touched by --write.
+
 Provenance: format/spacing mirrors the REAL converging_200iters.log fixture
 (source job 20260716-144932_train-curee-dr-2-s1_ba84, rsl_rl console output),
 values here are synthetic.
 """
 import random
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
 
 ESC = "\x1b"
 
@@ -52,8 +75,67 @@ def gen_two_iter_block():
                 elen=43.61, steps=298077, ts=98304)
 
 
+# Filename -> generator. Single source of truth for check mode, --write, and
+# the byte-identity assertions in tests/test_watch.py.
+GENERATED = {
+    "flattened_tail.log": gen_flattened_tail,
+    "two_iter_block.log": gen_two_iter_block,
+}
+
+# newline="" on BOTH read and write disables universal-newline translation,
+# so what we compare (and what we write) is exactly what the generator
+# produced — the same idiom tests/test_watch.py:_read_fixture uses.
+_IO = {"encoding": "utf-8", "newline": ""}
+
+
+def write():
+    """Rewrite every generated fixture in place. Returns the paths written."""
+    written = []
+    for name, gen in GENERATED.items():
+        path = HERE / name
+        with open(path, "w", **_IO) as f:
+            f.write(gen())
+        written.append(path)
+    return written
+
+
+def check():
+    """Byte-compare each committed fixture against its generator.
+
+    Returns a list of human-readable drift messages — empty means clean.
+    """
+    drift = []
+    for name, gen in GENERATED.items():
+        path = HERE / name
+        if not path.exists():
+            drift.append(f"{name}: MISSING — run `python _gen.py --write`")
+            continue
+        with open(path, **_IO) as f:
+            committed = f.read()
+        if committed != gen():
+            drift.append(
+                f"{name}: DRIFT — the committed bytes no longer match "
+                f"{gen.__name__}() in this file. Either the fixture was "
+                "hand-edited (restore it with `python _gen.py --write`) or "
+                "the generator changed on purpose (then --write and commit "
+                "the regenerated fixture together)."
+            )
+    return drift
+
+
 if __name__ == "__main__":
-    with open("flattened_tail.log", "w") as f:
-        f.write(gen_flattened_tail())
-    with open("two_iter_block.log", "w") as f:
-        f.write(gen_two_iter_block())
+    _args = sys.argv[1:]
+    if _args == ["--write"]:
+        for _p in write():
+            print(f"wrote {_p}")
+    elif not _args:
+        _drift = check()
+        for _msg in _drift:
+            print(f"_gen.py: {_msg}", file=sys.stderr)
+        if _drift:
+            sys.exit(1)
+        print(f"_gen.py: OK — {len(GENERATED)} fixtures match their generators")
+    else:
+        print(f"usage: {Path(__file__).name} [--write]   "
+              "(no argument = check mode)", file=sys.stderr)
+        sys.exit(2)

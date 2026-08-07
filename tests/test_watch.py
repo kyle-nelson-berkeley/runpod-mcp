@@ -32,6 +32,25 @@ def _read_fixture(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8", newline="")
 
 
+def _load_gen():
+    """Import the fixtures' _gen.py by path.
+
+    The fixtures directory is not a package, so a normal import cannot reach
+    it. Used only by the byte-identity assertions that PIN the two synthetic
+    .log fixtures to the generators that produced them — a hand-edited
+    fixture then fails the suite instead of silently redefining what the
+    parser and plateau heuristic are tested against. (`python _gen.py` runs
+    the same comparison standalone; `--write` regenerates.)
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "watch_fixture_gen", FIXTURES / "_gen.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 # --------------------------------------------------------------------- clock
 
 class FakeClock:
@@ -132,6 +151,12 @@ class TestMetricParser:
 
     def test_parses_two_iter_block_fixture_whole(self):
         text = _read_fixture("two_iter_block.log")
+        assert text == _load_gen().gen_two_iter_block(), (
+            "two_iter_block.log has drifted from _gen.gen_two_iter_block() — "
+            "the expectations below describe the GENERATOR's output, so a "
+            "hand-edited fixture makes this test lie. Restore with "
+            "`python _gen.py --write`, or --write + commit both together if "
+            "the generator changed on purpose.")
         p = watch.MetricParser()
         points = p.feed(text)
         assert [pt.iteration for pt in points] == [0, 1]
@@ -206,6 +231,13 @@ class TestPlateauDetector:
             "fixture — defaults are too tight")
 
     def test_fires_on_synthetic_flattened_tail_fixture(self):
+        assert _read_fixture("flattened_tail.log") == \
+            _load_gen().gen_flattened_tail(), (
+            "flattened_tail.log has drifted from _gen.gen_flattened_tail() — "
+            "the plateau band this test depends on is defined by the "
+            "generator (seeded rng, ~1.2 spread), so a hand-edited fixture "
+            "silently changes what 'plateau' means here. Restore with "
+            "`python _gen.py --write`.")
         points = self._points("flattened_tail.log")
         det = watch.PlateauDetector(watch.DEFAULT_PLATEAU_WINDOW,
                                     watch.DEFAULT_PLATEAU_MIN_DELTA)
