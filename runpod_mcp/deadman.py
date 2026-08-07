@@ -1,9 +1,10 @@
 """deadman — an independent Mac-side fuse that stops the RunPod pod after a
 fixed window, even if the process supervising a training run dies.
 
-CONTEXT: a prior run (Experiment F) lost ~$4.5 when the process running
-supervise.sh died and the pod idled ~7.2h before anyone noticed. The pod-side
-idle watchdog (armed by ensure_pod) is the primary backstop, but it depends on
+CONTEXT: a prior run (campaign 007 · 5 s horizon) lost ~$4.5 when the
+process running supervise.sh died and the pod idled ~7.2h before anyone
+noticed. The pod-side idle watchdog (armed by ensure_pod) is the primary
+backstop, but it depends on
 SSH/job-status reachability from the pod's own perspective; this deadman is a
 SEPARATE, independent Mac-side fuse with no dependency on any supervising
 process staying alive — arm it once at launch, and it fires on its own clock,
