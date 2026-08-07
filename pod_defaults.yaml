@@ -87,7 +87,8 @@ vehicles:
     known_hosts_file: ~/.ssh/known_hosts_runpod
     local_log_dir: logs/pod           # relative to repo root; gitignored
 
-  # New, distinct pod + volume (neither exists yet — ensure_pod creates both).
+  # Second pod + volume — both LIVE since 2026-08-05 (created by the first
+  # ensure_pod(vehicle='bluerov2'); campaign 001 ran on them the same day).
   bluerov2:
     pod_name: lts-replication-bluerov2
     network_volume_name: bluerov2-lts

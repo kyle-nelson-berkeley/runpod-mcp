@@ -131,6 +131,15 @@ from it). Liveness caveats: `caffeinate -i` guards idle sleep but not lid-close;
 `run_in_background` survival across WarmLifecycle reaping is unverified — the
 pod-side idle watchdog + job `timeout` ceiling are the guaranteed backstop.
 
+## Campaign chains (`chains/`)
+
+One bash script per campaign (named by campaign ID, e.g.
+`chain-011-CUREE_Adaptive-weights.sh`): the campaign's whole pod-side job
+sequence — patches, gates, trainings, evals, syncs — as ordered, sha-pinned
+links. Chains are launched through `supervise.sh` (which owns
+capture-and-stop), never hand-driven; they are the durable record of exactly
+what a campaign executed.
+
 ## Dry runs
 
 `ensure_pod`, `run_pod_setup`, `run_job`, `launch_training`,

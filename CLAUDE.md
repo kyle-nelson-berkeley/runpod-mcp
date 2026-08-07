@@ -43,12 +43,15 @@ a human touching SSH.
 
 ## C · Stack & layout
 
-- Python + FastMCP; RunPod REST v1 + GraphQL client; paramiko SSH
+- Python + FastMCP; RunPod REST v1 + GraphQL client; subprocess-wrapped
+  `ssh`/`rsync` (no paramiko anywhere)
 - **API key:** macOS Keychain (`runpod-api-key`) only — never echoed,
   written, or passed as an argument
 - **Wired via** root `.mcp.json`; entry point `run.sh` → `server.py`
 - `runpod_mcp/` — implementation; `pod_defaults.yaml` — pod spec +
-  guardrail constants; `tests/` — the suite
+  guardrail constants; `tests/` — the suite; `chains/` — per-campaign launch
+  chains (one bash script per campaign, named by campaign ID, sequencing a
+  whole campaign's pod jobs; launched via `supervise.sh`, never hand-driven)
 - **Run tests:** `.venv/bin/python -m pytest tests -q` (from this folder;
   venv is gitignored — recreate with `python3 -m venv .venv &&
   .venv/bin/pip install -r requirements.txt`)
