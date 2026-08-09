@@ -40,10 +40,29 @@ deadman.sh   → caffeinate -i wrapper around  python -m runpod_mcp.deadman (arm
   (container env vars are unreliable in detached BatchMode shells);
   `/etc/rp_environment` is sourced for runpodctl credentials; arming
   auto_stop probes runpodctl synchronously and fails loudly if it can't work.
-- **Idle watchdog**: reinstalled on every transition-to-running (container
-  disk wipes on stop). Every 5 min: no live job pid + no sshd session +
+  The probe (2026-08-09) is a three-way diagnostic: the bare-shell checks
+  decide nothing (they answer H1-vs-H2 and capture the bare PATH),
+  `/etc/rp_environment` is then sourced unconditionally, and the SOURCED
+  pair carries the verdict — `NO_RUNPODCTL` (binary absent even after
+  sourcing, exit 90), `NO_RUNPODCTL_AUTH_SOURCED` (still refused after
+  sourcing, exit 91), `PROBE_OK` (sourced success only;
+  `NO_RUNPODCTL_AUTH_BARE` is the mid-stream diagnostic that continues).
+- **Idle watchdog**: reinstalled on every transition-to-running — the
+  container-disk wipe removes runtime-installed material (`idle_watchdog.sh`
+  itself, the apt X11/GL libs, `rsync`), which is why install-on-every-
+  transition stays; `runpodctl` is IMAGE-SHIPPED and back on every boot (a
+  wipe restores the disk from the image, it does not empty it — corrected
+  2026-08-09). Every 5 min: no live job pid + no sshd session +
   `/workspace/.keepalive` older than 60 min → `runpodctl stop pod`.
   `touch /workspace/.keepalive` is the manual-session escape hatch.
+  A successful install reports **`armed (stop path unverified)`** — the probe
+  certifies READ (`get pod`), the watchdog needs WRITE (`stop pod`); the
+  first real confirmation is a successful-stop entry in
+  `/workspace/.idle_watchdog.log`. Status (2026-08-09): the install probe has
+  failed on every recorded bring-up (opaque rc=91 pre-fix) — the watchdog has
+  never yet armed; defect 2 ships DIAGNOSED, not CLOSED, and the next
+  bring-up's sentinel settles it. `idle_watchdog: FAILED` ⇒ arm the Mac-side
+  deadman before any job.
 - **Guardrails are code**: one pod per declared vehicle (any other pod name
   on the account is refused), RTX 4090 ×1, SECURE, interruptible forced
   false, network volume required, `terminate_pod` needs an explicit
@@ -129,7 +148,10 @@ the vehicle's log dir (`logs/pod/` hippocampus, `logs/pod/bluerov2/`
 bluerov2) is the recovery contract (a later session reconciles stop state
 from it). Liveness caveats: `caffeinate -i` guards idle sleep but not lid-close;
 `run_in_background` survival across WarmLifecycle reaping is unverified — the
-pod-side idle watchdog + job `timeout` ceiling are the guaranteed backstop.
+job's `timeout` ceiling is the guaranteed backstop; the pod-side idle watchdog
+would back it up but has never yet armed on a recorded bring-up (DIAGNOSED,
+not CLOSED — see the Idle-watchdog bullet), so arm the Mac-side deadman when
+`ensure_pod` reports `idle_watchdog: FAILED`.
 
 ## Campaign chains (`chains/`)
 

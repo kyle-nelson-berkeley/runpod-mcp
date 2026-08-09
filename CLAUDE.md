@@ -19,6 +19,23 @@ one pod PER VEHICLE (unknown pod names refused), RTX 4090 only, Secure
 Cloud, never interruptible, network volume required, idle watchdog, per-job
 `auto_stop`.
 
+**Watchdog status (2026-08-09):** the pod-side idle watchdog has never once
+armed in recorded history — the install probe failed on every attempt (opaque
+rc=91 pre-fix). Mechanism facts: `runpodctl` is IMAGE-SHIPPED (a
+container-disk wipe restores the disk from the image, it does not empty it —
+the binary is back on every boot); what the wipe removes is runtime-installed
+material (`idle_watchdog.sh` itself, apt libs, `rsync`), which is why
+install-on-every-transition stays. The 2026-08-09 fix ships a three-way
+diagnostic probe (`NO_RUNPODCTL` exit 90 / `NO_RUNPODCTL_AUTH_BARE`
+diagnostic-continue / `NO_RUNPODCTL_AUTH_SOURCED` exit 91 / `PROBE_OK`) with
+`/etc/rp_environment` sourced unconditionally; a success reports
+**`armed (stop path unverified)`** — the probe certifies READ, the watchdog
+needs WRITE; first real confirmation is a successful stop in
+`/workspace/.idle_watchdog.log`. **Defect 2 ships DIAGNOSED, not CLOSED** —
+the next bring-up's sentinel settles H1 (no credential on the pod) vs H2
+(unsourced shell, fixed by the sourcing change). Until then:
+`idle_watchdog: FAILED` ⇒ arm the Mac-side deadman before any job.
+
 **Two-vehicle scoping (2026-08-04):** the server manages TWO pods+volumes —
 `hippocampus` (== the original `lts-replication` pod + `lts-replication`
 volume; every default resolves here, so bare calls behave exactly as before)
@@ -90,7 +107,8 @@ zero logic duplication.
     deadline the job is normally already past its own pod-side
     `timeout --kill-after` ceiling. If SSH is hung, that capture can delay the
     force-stop up to the rsync timeout; the stop still always follows (bounded,
-    never unbounded) and the pod-side idle watchdog is the hard backstop.
+    never unbounded) and the pod-side idle watchdog is the intended hard
+    backstop (unverified live — §A watchdog-status note; deadman when FAILED).
 - **The durable JSON summary is the recovery contract**
   (`supervise-<job_id>.json` in the vehicle's log dir — `logs/pod/` for
   hippocampus, `logs/pod/bluerov2/` for bluerov2): a later session reads it
@@ -105,9 +123,10 @@ zero logic duplication.
   `caffeinate -i`, which holds off *idle* sleep only — it does **not** stop
   clamshell/lid-close sleep on battery. And whether a `run_in_background`
   Bash task survives WarmLifecycle idle-reaping of its parent session is
-  **unverified**. Either way the *safety* outcome is held by the pod-side
-  idle watchdog + the job's own `timeout --kill-after` ceiling; only the
-  notification ergonomic degrades.
+  **unverified**. Either way the *safety* outcome is held by the job's own
+  `timeout --kill-after` ceiling plus the pod-side idle watchdog (the latter
+  unverified live — §A watchdog-status note); only the notification
+  ergonomic degrades.
 - `--sync-subdir` is REQUIRED in `--job-name` mode (pass `none` to skip the
   analysis sync — the job-dir pull still happens regardless); `--training`
   defaults it to `rsl_rl/warpauv_direct`.
