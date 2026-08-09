@@ -45,18 +45,121 @@ def build_cmd_script(command: str, workdir: str, env: dict | None = None) -> str
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------- runpodctl probe (3-way)
+# Both probe sites used to chain `command -v runpodctl && runpodctl get pod`,
+# so binary-absent and auth-refused collapsed onto ONE exit code — nobody could
+# tell which half failed on 2026-08-07. The split below NAMES the cause and, in
+# the same pass, fixes the likeliest one: a gate must run in the environment it
+# certifies, so the retry sources /etc/rp_environment exactly like the two
+# consumers do (job_wrapper.sh:23-24, idle_watchdog.sh:32). ssh.run() opens a
+# non-interactive, non-login shell, where that file is never read.
+#
+# HARD RULE — names, paths and booleans ONLY, never the file's CONTENTS. The
+# retry SOURCES /etc/rp_environment; nothing ever prints it. A `cat` would put
+# an API key into MCP output, and config.scrub() runs on error paths only.
+RP_ENV = "/etc/rp_environment"
+SENTINEL_NO_BIN = "NO_RUNPODCTL"
+SENTINEL_AUTH_BARE = "NO_RUNPODCTL_AUTH_BARE"
+SENTINEL_AUTH_SOURCED = "NO_RUNPODCTL_AUTH_SOURCED"
+RC_NO_RUNPODCTL = 90      # binary genuinely absent (new; callers read rc != 0)
+RC_NO_AUTH = 91           # terminal auth failure (unchanged)
+# stdout is the ONLY place the sentinels and the PATH / ls -l captures exist,
+# so the raised errors ship a slice big enough to actually contain them (the
+# captures are multi-line; the old 100-char cap truncated inside the first one)
+_OUT_CAP = 600
+
+# candidate (d), the PATH suspect: a variable name/value that is not a secret,
+# plus filesystem metadata for the two image-shipped install paths
+_PROBE_DIAG = ('echo "PATH=$PATH"; '
+               'ls -l /usr/local/bin/runpodctl /usr/bin/runpodctl 2>&1; ')
+
+_PROBE_FIXES = {
+    SENTINEL_NO_BIN: (
+        "the runpodctl BINARY is unreachable even AFTER sourcing "
+        f"{RP_ENV} (compare the two PATH= / ls -l captures in the probe "
+        "output) — no pod-side stop path can exist until the binary is back"),
+    SENTINEL_AUTH_BARE: (
+        "runpodctl was refused in the BARE unsourced shell but accepted after "
+        f"sourcing {RP_ENV} [H2] — the credential exists and only the "
+        "non-interactive shell lacked it; that is what this probe now fixes"),
+    SENTINEL_AUTH_SOURCED: (
+        "runpodctl was refused BOTH bare AND after sourcing "
+        f"{RP_ENV} [H1] — there is no usable credential anywhere on the pod, "
+        "so sourcing cannot fix this one"),
+}
+
+
+def _runpodctl_probe_command(pod_id: str, *, fail_extra: str = "") -> str:
+    """Three-way diagnostic probe, as a command PREFIX: it exits on failure and
+    falls THROUGH on success, so each caller appends its own continuation.
+
+    The shape is BARE-DIAGNOSTIC then SOURCED-VERDICT:
+
+      1. The bare pair (`command -v`, then `get pod`) decides NOTHING. It exists
+         only to answer the H1-vs-H2 question — a bare refusal followed by a
+         sourced success is what confirms H2 — and to capture the BARE PATH,
+         which is the §2.1d evidence when the binary is off the minimal PATH.
+      2. `/etc/rp_environment` is then sourced UNCONDITIONALLY, whatever the
+         bare result (plan §2.3-B: "a gate must run in the environment it
+         certifies"). Both real consumers — job_wrapper.sh:23-24 and
+         idle_watchdog.sh:32 — always source it before touching runpodctl, so a
+         bare pass proves nothing about the stop path: a file that overrides
+         PATH or the credential would leave the probe reporting PROBE_OK while
+         every watchdog tick fails. That is the armed-but-dud $16/day leak this
+         gate exists to prevent.
+      3. The sourced pair is AUTHORITATIVE and carries the verdict sentinels:
+         still no binary => NO_RUNPODCTL/90, still refused => AUTH_SOURCED/91.
+         Falling through means the stop path works in the environment it will
+         actually run in.
+
+    `fail_extra` is echoed on every failure exit (the watchdog keeps emitting
+    its legacy WATCHDOG_PROBE_FAILED sentinel alongside the finer one)."""
+    qid = shlex.quote(pod_id)
+    have = "command -v runpodctl >/dev/null 2>&1"
+    get = f"runpodctl get pod {qid} >/dev/null 2>&1"
+    return (
+        # 1 · bare shell — diagnostics only, no verdict. The elif matters: a
+        # missing binary must not masquerade as an auth refusal.
+        f"if ! {have}; then {_PROBE_DIAG}"
+        f"elif ! {get}; then echo {SENTINEL_AUTH_BARE}; {_PROBE_DIAG}fi; "
+        # 2 · the environment the consumers actually run in
+        f"[ -f {RP_ENV} ] && . {RP_ENV}; "
+        # 3 · sourced shell — the authoritative checks
+        f"if ! {have}; then echo {SENTINEL_NO_BIN}; {fail_extra}{_PROBE_DIAG}"
+        f"exit {RC_NO_RUNPODCTL}; fi; "
+        f"if ! {get}; then echo {SENTINEL_AUTH_SOURCED}; {fail_extra}"
+        f"exit {RC_NO_AUTH}; fi; "
+    )
+
+
+def _probe_diagnosis(stdout: str) -> str:
+    """Name WHICH half failed so the caller's warning names WHICH fix applies.
+
+    Read off whole lines (the sentinels are echoed alone) and prefer the
+    TERMINAL sentinel: an H1 failure emits AUTH_BARE first, then AUTH_SOURCED.
+    Returned separately from the raw output slice because that slice is
+    truncated and the diagnostic PATH/ls noise would otherwise bury it."""
+    lines = {ln.strip() for ln in stdout.splitlines()}
+    for sentinel in (SENTINEL_AUTH_SOURCED, SENTINEL_AUTH_BARE,
+                     SENTINEL_NO_BIN):
+        if sentinel in lines:
+            return f"cause={sentinel} — {_PROBE_FIXES[sentinel]}"
+    return ("cause=UNKNOWN — the runpodctl probe half reported no failure; "
+            "the cause is elsewhere (see out=/err= below)")
+
+
 def _probe_auto_stop(ssh, host: str, port: int, pod_id: str) -> None:
     """auto_stop must fail LOUDLY at launch if the stop path can't work —
     an armed-but-dud auto_stop is a silent $16/day leak."""
-    qid = shlex.quote(pod_id)
     proc = ssh.run(host, port,
-                   f"command -v runpodctl >/dev/null 2>&1 && "
-                   f"runpodctl get pod {qid} >/dev/null 2>&1 && echo PROBE_OK",
+                   _runpodctl_probe_command(pod_id) + "echo PROBE_OK",
                    timeout=60)
     if proc.returncode != 0 or "PROBE_OK" not in proc.stdout:
         raise JobError(
             "auto_stop requested but the runpodctl self-stop probe FAILED on "
-            f"the pod (rc={proc.returncode}, stderr={scrub(proc.stderr).strip()[:200]}). "
+            f"the pod (rc={proc.returncode}, {_probe_diagnosis(proc.stdout)}, "
+            f"out={scrub(proc.stdout).strip()[:_OUT_CAP]}, "
+            f"stderr={scrub(proc.stderr).strip()[:200]}). "
             "Refusing to launch with a dud auto_stop — fix runpodctl on the pod "
             "or launch with auto_stop=false and stop_pod() yourself.")
 
@@ -181,10 +284,11 @@ def watchdog_install_command(pod_id: str, idle_minutes: int) -> str:
     qid = shlex.quote(pod_id)
     qmin = shlex.quote(str(int(idle_minutes)))
     return (
-        f"command -v runpodctl >/dev/null 2>&1 && "
-        f"runpodctl get pod {qid} >/dev/null 2>&1 || "
-        f"{{ echo WATCHDOG_PROBE_FAILED; exit 91; }}; "
-        f"[ -f {WATCHDOG_REMOTE} ] || {{ echo WATCHDOG_MISSING; exit 92; }}; "
+        # same three-way split as _probe_auto_stop, and it keeps emitting the
+        # legacy WATCHDOG_PROBE_FAILED on every failure exit
+        _runpodctl_probe_command(pod_id,
+                                 fail_extra="echo WATCHDOG_PROBE_FAILED; ")
+        + f"[ -f {WATCHDOG_REMOTE} ] || {{ echo WATCHDOG_MISSING; exit 92; }}; "
         f"[ -f /workspace/.idle_watchdog.pid ] && "
         f"kill \"$(cat /workspace/.idle_watchdog.pid)\" 2>/dev/null; "
         f"touch {KEEPALIVE} && "
@@ -206,6 +310,7 @@ def install_watchdog(ssh, host: str, port: int, pod_id: str,
     if proc.returncode != 0 or "WATCHDOG_ARMED" not in proc.stdout:
         raise JobError(
             f"idle watchdog install FAILED (rc={proc.returncode}, "
-            f"out={scrub(proc.stdout).strip()[:100]}, "
+            f"{_probe_diagnosis(proc.stdout)}, "
+            f"out={scrub(proc.stdout).strip()[:_OUT_CAP]}, "
             f"err={scrub(proc.stderr).strip()[:200]}) — the pod will NOT "
             "self-stop when idle; stop it manually when done")

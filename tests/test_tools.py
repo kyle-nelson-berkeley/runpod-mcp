@@ -187,7 +187,9 @@ def test_ensure_pod_resume_truncates_knownhosts_and_arms_watchdog():
     assert out["status"] == "running"
     assert out["driver_version"] == "535.161.08"
     assert rt.ssh.truncated == 1                       # resume wipes host keys
-    assert out["idle_watchdog"] == "armed"
+    # OPS-DEFECTS-PLAN.md §3 u.7: the probe certifies READ, the watchdog needs
+    # WRITE — never report a bare "armed"
+    assert out["idle_watchdog"] == "armed (stop path unverified)"
     pushed = dict(rt.ssh.push_texts)
     assert jobs.WATCHDOG_REMOTE in pushed              # reinstalled every time
 
@@ -200,7 +202,9 @@ def test_ensure_pod_already_running_still_rearms_guards():
     out = tools.ensure_pod(rt)
     assert out["status"] == "running"
     assert rt.ssh.truncated == 1
-    assert out["idle_watchdog"] == "armed"
+    # OPS-DEFECTS-PLAN.md §3 u.7: the probe certifies READ, the watchdog needs
+    # WRITE — never report a bare "armed"
+    assert out["idle_watchdog"] == "armed (stop path unverified)"
     assert "start_pod:on2ghkedz0vbjr" not in rt.client.calls
 
 

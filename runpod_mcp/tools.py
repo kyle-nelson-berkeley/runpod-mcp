@@ -461,12 +461,20 @@ def ensure_pod(rt: Runtime, dry_run: bool = False) -> dict:
     try:
         jobs.install_watchdog(rt.ssh, host, int(port), pod["id"],
                               cfg["idle_minutes"])
-        out["idle_watchdog"] = "armed"
+        # NEVER bare "armed": the probe certifies READ access
+        # (`runpodctl get pod`), the watchdog needs WRITE (`runpodctl stop
+        # pod`, idle_watchdog.sh:53). A read-scoped credential would probe OK
+        # and then fail every tick. First real confirmation of the stop path is
+        # a successful stop recorded in /workspace/.idle_watchdog.log.
+        out["idle_watchdog"] = "armed (stop path unverified)"
     except (jobs.JobError, ssh.SSHError) as exc:
         out["idle_watchdog"] = "FAILED"                 # loud, never silent
         out["idle_watchdog_warning"] = (
-            f"{scrub(exc)} — the pod will NOT self-stop when idle; "
-            "stop_pod() yourself when done")
+            f"{scrub(exc)} — the pod will NOT self-stop when idle. ARM THE "
+            f"MAC-SIDE DEADMAN BEFORE ANY JOB: ./deadman.sh arm --vehicle "
+            f"{rt.vehicle} --hours <n> & — and note it runs ON THE MAC and "
+            "DIES WITH IT (Mac reboot/sleep/power-loss leaves the pod "
+            "running), so also stop_pod() yourself when done")
     return out
 
 
