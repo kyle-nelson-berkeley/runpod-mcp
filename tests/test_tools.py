@@ -349,7 +349,7 @@ def test_launch_training_dry_run_needs_no_pod():
     assert out["command"] == training.build_train_command(seed=3)
     assert out["workdir"] == "/workspace/IsaacLab"
     assert out["dr_edits"]["com_to_cob_offset_radius"] == "0.025"
-    assert out["max_runtime_sec"] == 3600
+    assert out["max_runtime_sec"] == 10800   # timeouts.training_sec (Unit 2)
     assert "gates" in out
 
 

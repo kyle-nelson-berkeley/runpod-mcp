@@ -45,7 +45,7 @@ idle_minutes: 60              # idle_watchdog stops the pod after this
 # Wall-clock ceilings (seconds) for detached jobs — job_wrapper.sh `timeout`
 timeouts:
   setup_sec: 5400             # pod_setup.sh first run: 30-60 min
-  training_sec: 3600          # one policy: 10-20 min + margin
+  training_sec: 10800         # one policy incl. 10k-iter budget extensions + 3x variance margin
   sweep_sec: 3600             # axis sanity sweep incl. first sim warm-up
   job_sec: 3600               # generic run_job default
   exec_max_sec: 600           # exec_on_pod synchronous ceiling

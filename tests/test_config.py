@@ -38,7 +38,7 @@ def test_defaults_have_runtime_ceilings():
     cfg = config.load_defaults()
     t = cfg["timeouts"]
     assert t["setup_sec"] == 5400          # first pod_setup run: 30-60 min
-    assert t["training_sec"] == 3600       # 10-20 min training + margin
+    assert t["training_sec"] == 10800      # 10k-iter budget extension + 3x variance
     assert t["sweep_sec"] == 3600
     assert t["job_sec"] == 3600
     assert t["exec_max_sec"] == 600        # exec_on_pod hard ceiling
