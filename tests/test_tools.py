@@ -444,7 +444,7 @@ def test_apply_patches_pushes_and_runs():
                  ssh_results=[ok("LIVE_LIST_END\n"), ok("PATCH OK")])
     out = tools.apply_bluerov_patches(rt)
     files = dict(rt.ssh.push_files)
-    assert str(REPO_ROOT / "patches" / "bluerov2_heavy_thrusters.py") in files
+    assert str(REPO_ROOT / "BLUEROV2" / "patches" / "bluerov2_heavy_thrusters.py") in files
     pushed = dict(rt.ssh.push_texts)
     assert "/workspace/patches/apply_bluerov2_patch.py" in pushed
     assert "pristine" in pushed["/workspace/patches/apply_bluerov2_patch.py"]
@@ -470,7 +470,7 @@ def test_axis_sanity_sweep_marker_only_on_success():
     assert out["job_id"]
     pushed = dict(rt.ssh.push_texts)
     files = dict(rt.ssh.push_files)
-    assert str(REPO_ROOT / "patches" / "axis_sanity_sweep.py") in files
+    assert str(REPO_ROOT / "BLUEROV2" / "patches" / "axis_sanity_sweep.py") in files
     cmd_sh = next(t for p, t in rt.ssh.push_texts if p.endswith("cmd.sh"))
     assert "./isaaclab.sh -p /workspace/patches/axis_sanity_sweep.py --headless" in cmd_sh
     assert f"&& touch {training.SANITY_MARKER}" in cmd_sh   # only on exit 0

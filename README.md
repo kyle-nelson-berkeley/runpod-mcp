@@ -101,8 +101,8 @@ RUNPOD_MCP_LIVE=1 runpod-mcp/.venv/bin/python -m pytest \
 Offline tests use `httpx.MockTransport` + duck-typed fake SSH — no network,
 no key. Live tests are read-only GETs + an MCP stdio handshake through
 `run.sh` (asserts all 14 tools register). DR tables are cross-checked by
-parsing [config/bluerov2_heavy.yaml](../config/bluerov2_heavy.yaml),
-[RUNBOOK.md](../runbook/RUNBOOK.md) and [APPLY.md](../patches/APPLY.md);
+parsing [BLUEROV2/config/bluerov2_heavy.yaml](../BLUEROV2/config/bluerov2_heavy.yaml),
+[RUNBOOK.md](../runbook/RUNBOOK.md) and [APPLY.md](../BLUEROV2/patches/APPLY.md);
 the patch script is exercised against committed fixture excerpts of the
 pinned `7c5ebe7` sources (plus a SHA-gated test against the real reference
 clone when present — read-only, tmp copies).

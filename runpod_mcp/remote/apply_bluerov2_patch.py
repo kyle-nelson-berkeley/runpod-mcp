@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""apply_bluerov2_patch.py — automate patches/APPLY.md §§1-5 on the pod.
+"""apply_bluerov2_patch.py — automate BLUEROV2/patches/APPLY.md §§1-5 on the pod.
 
 Converts the warplab isaac-auv-env checkout (pinned @ 7c5ebe7) from the
 6-thruster CUREE to the 8-thruster BlueROV2 Heavy. Stdlib only — runs on the
@@ -34,7 +34,7 @@ PIN_SHA = "7c5ebe7f7a08acd2570b5fba328e92b7f59f6794"
 DROP_IN = "bluerov2_heavy_thrusters.py"
 
 # (label, pattern, replacement, expected_match_count) — all against the
-# PRISTINE 7c5ebe7 content, quoted from patches/APPLY.md.
+# PRISTINE 7c5ebe7 content, quoted from BLUEROV2/patches/APPLY.md.
 ENV_EDITS = [
     ("§1 import swap (thruster geometry from the drop-in)",
      r"from \.thruster_dynamics import DynamicsFirstOrder, "
@@ -126,7 +126,7 @@ def main() -> None:
     ap.add_argument("--repo", default="/workspace/isaac-auv-env",
                     help="isaac-auv-env checkout to patch")
     ap.add_argument("--thrusters", required=True,
-                    help="path to patches/bluerov2_heavy_thrusters.py (drop-in)")
+                    help="path to BLUEROV2/patches/bluerov2_heavy_thrusters.py (drop-in)")
     ap.add_argument("--markers", default="/workspace/markers",
                     help="marker directory (network volume)")
     ap.add_argument("--expect-sha", default=PIN_SHA,

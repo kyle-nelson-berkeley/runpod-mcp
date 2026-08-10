@@ -3,8 +3,8 @@
 Sources of truth (unit tests cross-check all three, char-exact):
   - CUREE table:    runbook/RUNBOOK.md Days 2-3 (code is ground truth for the
                     0.05 m radius — the paper's Table II claims 10x more)
-  - BlueROV2 table: config/bluerov2_heavy.yaml domain_randomization.recommended
-                    == patches/APPLY.md §4
+  - BlueROV2 table: BLUEROV2/config/bluerov2_heavy.yaml domain_randomization.recommended
+                    == BLUEROV2/patches/APPLY.md §4
   - train command:  RUNBOOK.md verbatim ([README] + seed/headless flags)
 
 DR edits are CONTENT-ANCHORED with an expected-current-value assertion —

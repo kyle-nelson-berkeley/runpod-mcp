@@ -141,7 +141,7 @@ def sync_logs(subdir: str = "rsl_rl/warpauv_direct",
 
 @mcp.tool()
 def apply_bluerov_patches(dry_run: bool = False, force: bool = False) -> dict:
-    """Automate patches/APPLY.md §§1-5 on the BLUEROV2 pod (bluerov2 by
+    """Automate BLUEROV2/patches/APPLY.md §§1-5 on the BLUEROV2 pod (bluerov2 by
     nature — no vehicle param): restore pristine 7c5ebe7, install the
     8-thruster drop-in, apply the content-anchored edits, write
     markers/bluerov2_patch_applied. Idempotent (pristine-then-apply). Refuses
@@ -152,7 +152,7 @@ def apply_bluerov_patches(dry_run: bool = False, force: bool = False) -> dict:
 
 @mcp.tool()
 def axis_sanity_sweep(auto_stop: bool = False) -> dict:
-    """Run patches/axis_sanity_sweep.py headless as a detached job on the
+    """Run BLUEROV2/patches/axis_sanity_sweep.py headless as a detached job on the
     BLUEROV2 pod (bluerov2 by nature — no vehicle param); writes
     markers/axis_sanity_PASS ONLY on exit 0. MANDATORY after patching and
     BEFORE any bluerov2 training (RUNBOOK Days 4-5)."""

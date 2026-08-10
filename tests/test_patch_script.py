@@ -12,7 +12,7 @@ from tests.conftest import MCP_ROOT, REPO_ROOT
 
 SCRIPT = MCP_ROOT / "runpod_mcp" / "remote" / "apply_bluerov2_patch.py"
 FIXTURES = MCP_ROOT / "tests" / "fixtures"
-THRUSTERS = REPO_ROOT / "patches" / "bluerov2_heavy_thrusters.py"
+THRUSTERS = REPO_ROOT / "BLUEROV2" / "patches" / "bluerov2_heavy_thrusters.py"
 PIN = "7c5ebe7f7a08acd2570b5fba328e92b7f59f6794"
 REFERENCE = REPO_ROOT / "reference" / "isaac-auv-env"
 

@@ -2,7 +2,7 @@
 
 Makes the runpod_mcp package importable and exposes repo-root paths so tests
 can cross-check the code against the source-of-truth files (RUNBOOK.md,
-config/bluerov2_heavy.yaml, patches/APPLY.md).
+BLUEROV2/config/bluerov2_heavy.yaml, BLUEROV2/patches/APPLY.md).
 """
 import os
 import sys

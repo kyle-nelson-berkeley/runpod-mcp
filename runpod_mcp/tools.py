@@ -38,9 +38,9 @@ SETUP_ENV = {
 
 POD_SETUP_LOCAL = REPO_ROOT / "runbook" / "pod_setup.sh"
 POD_SETUP_REMOTE = "/workspace/pod_setup.sh"
-SWEEP_LOCAL = REPO_ROOT / "patches" / "axis_sanity_sweep.py"
+SWEEP_LOCAL = REPO_ROOT / "BLUEROV2" / "patches" / "axis_sanity_sweep.py"
 SWEEP_REMOTE = "/workspace/patches/axis_sanity_sweep.py"
-THRUSTERS_LOCAL = REPO_ROOT / "patches" / "bluerov2_heavy_thrusters.py"
+THRUSTERS_LOCAL = REPO_ROOT / "BLUEROV2" / "patches" / "bluerov2_heavy_thrusters.py"
 THRUSTERS_REMOTE = "/workspace/patches/bluerov2_heavy_thrusters.py"
 PATCH_SCRIPT_LOCAL = Path(__file__).resolve().parent / "remote" / "apply_bluerov2_patch.py"
 PATCH_SCRIPT_REMOTE = "/workspace/patches/apply_bluerov2_patch.py"

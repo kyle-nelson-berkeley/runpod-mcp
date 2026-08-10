@@ -1,5 +1,5 @@
 """Unit 4: training.py — DR tables cross-checked against the source-of-truth
-files (config/bluerov2_heavy.yaml, RUNBOOK.md, APPLY.md), verbatim train
+files (BLUEROV2/config/bluerov2_heavy.yaml, RUNBOOK.md, APPLY.md), verbatim train
 command, content-anchored DR edits with expected-current-value assertion."""
 import re
 
@@ -15,7 +15,9 @@ FIXTURE = (MCP_ROOT / "tests" / "fixtures" / "warpauv_env_excerpt_7c5ebe7.py").r
 # ----------------------------------------------- DR tables vs source of truth
 
 def test_bluerov2_table_matches_config_yaml():
-    cfg = yaml.safe_load((REPO_ROOT / "config" / "bluerov2_heavy.yaml").read_text())
+    cfg = yaml.safe_load(
+        (REPO_ROOT / "BLUEROV2" / "config" / "bluerov2_heavy.yaml").read_text()
+    )
     rec = cfg["domain_randomization"]["recommended"]
     t = training.DR_TABLES["bluerov2"]
     assert float(t["DR_1"]["com_to_cob_offset_radius"]) == \
@@ -46,7 +48,7 @@ def test_curee_table_matches_runbook_table():
 
 
 def test_bluerov2_table_matches_apply_md_section4():
-    apply_md = (REPO_ROOT / "patches" / "APPLY.md").read_text()
+    apply_md = (REPO_ROOT / "BLUEROV2" / "patches" / "APPLY.md").read_text()
     sec4 = apply_md.split("## 4.")[1].split("## 5.")[0]
     t = training.DR_TABLES["bluerov2"]
     for level, alias in [("DR_0", "No DR"), ("DR_1", "Small DR"), ("DR_2", "Large DR")]:
