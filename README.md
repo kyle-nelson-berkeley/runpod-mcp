@@ -153,7 +153,7 @@ would back it up but has never yet armed on a recorded bring-up (DIAGNOSED,
 not CLOSED — see the Idle-watchdog bullet), so arm the Mac-side deadman when
 `ensure_pod` reports `idle_watchdog: FAILED`.
 
-## Campaign chains (`chains/`)
+## Campaign chains (`CUREE/chains/`)
 
 One bash script per campaign (named by campaign ID, e.g.
 `chain-011-CUREE_Adaptive-weights.sh`): the campaign's whole pod-side job

@@ -1,7 +1,7 @@
 """Offline behavioral coverage for chain-010-CUREE_Weight-screen.sh.
 
-The chain script (runpod-mcp/chains/chain-010-CUREE_Weight-screen.sh) has NO
-test hooks — it derives every path from BASH_SOURCE (DIR -> MCPDIR -> REPO),
+The chain script (CUREE/chains/chain-010-CUREE_Weight-screen.sh) has NO
+test hooks — it derives every path from BASH_SOURCE (DIR -> REPO -> MCPDIR),
 exactly like chain-009. So this suite sandboxes it by COPYING the real script
 into a scratch repo layout under pytest tmp_path, alongside:
 
@@ -40,7 +40,12 @@ from pathlib import Path
 import pytest
 
 MCP_ROOT = Path(__file__).resolve().parents[1]                    # runpod-mcp/
-REAL_CHAIN = MCP_ROOT / "chains" / "chain-010-CUREE_Weight-screen.sh"
+REPO_ROOT = MCP_ROOT.parent                                       # repo root
+# The chains moved to CUREE/ on 2026-08-11 (problem-log C2): they are
+# CUREE-owned campaign drivers, not MCP suite layout. The sandbox below must
+# mirror that, or it would execute the script from the OLD layout and pass
+# without ever exercising the relocation.
+REAL_CHAIN = REPO_ROOT / "CUREE" / "chains" / "chain-010-CUREE_Weight-screen.sh"
 
 BASELINE_DIRS = {
     1: "2026-07-16_12-51-52",
@@ -307,7 +312,8 @@ class Harness:
         self.tmp_path = tmp_path
         self.repo = tmp_path / "repo"
         self.mcp = self.repo / "runpod-mcp"
-        self.chains = self.mcp / "chains"
+        self.curee = self.repo / "CUREE"
+        self.chains = self.curee / "chains"
         self.venv_bin = self.mcp / ".venv" / "bin"
         self.logdir = self.repo / "logs" / "pod"
         self.rundirs_local = self.logdir / "rsl_rl" / "warpauv_direct"
@@ -327,6 +333,10 @@ class Harness:
 
     def _build(self):
         self.chains.mkdir(parents=True)
+        # Explicit: `chains` no longer lives under `mcp`, so creating it no
+        # longer creates `mcp` as a side effect. The stub supervise.sh /
+        # requirements.txt / .venv all land there.
+        self.mcp.mkdir(parents=True, exist_ok=True)
         self.venv_bin.mkdir(parents=True)
         self.rundirs_local.mkdir(parents=True)
         (self.logdir / "jobs").mkdir(parents=True)

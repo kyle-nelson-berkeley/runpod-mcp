@@ -66,9 +66,11 @@ a human touching SSH.
   written, or passed as an argument
 - **Wired via** root `.mcp.json`; entry point `run.sh` → `server.py`
 - `runpod_mcp/` — implementation; `pod_defaults.yaml` — pod spec +
-  guardrail constants; `tests/` — the suite; `chains/` — per-campaign launch
-  chains (one bash script per campaign, named by campaign ID, sequencing a
-  whole campaign's pod jobs; launched via `supervise.sh`, never hand-driven)
+  guardrail constants; `tests/` — the suite. Per-campaign launch chains are
+  NOT here: they are vehicle-owned and live at `<VEHICLE>/chains/` (CUREE's
+  are at `CUREE/chains/`) — one bash script per campaign, named by campaign
+  ID, sequencing a whole campaign's pod jobs, launched via `supervise.sh` and
+  never hand-driven.
 - **Run tests:** `.venv/bin/python -m pytest tests -q` (from this folder;
   venv is gitignored — recreate with `python3 -m venv .venv &&
   .venv/bin/pip install -r requirements.txt`)
