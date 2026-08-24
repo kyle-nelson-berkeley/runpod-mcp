@@ -100,8 +100,12 @@ launch:
    from every error and log):
 
    ```
-   security add-generic-password -a "$USER" -s runpod-api-key -w '<KEY>'
+   security add-generic-password -a kyle -s runpod-api-key -w '<KEY>'
    ```
+
+   (The lookup account name is currently hardcoded to `kyle` in
+   `runpod_mcp/config.py` — adjust both together if your macOS account
+   differs.)
 
 2. **SSH key**: `~/.ssh/id_ed25519(.pub)` must exist; the `.pub` is injected
    at pod-create via the `PUBLIC_KEY` env var (what `runpod/pytorch` images
