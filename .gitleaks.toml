@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Obviously-fake test fixture keys used to prove the rpa_ scrubber works (tests assert these values are NEVER leaked)"
+regexes = ['''rpa_TESTKEY\d+''', '''rpa_SECRET(VALUE)?\d+''', '''rpa_FAKEKEYVALUE\d+''', '''rpa_LEAKMENOW''']
