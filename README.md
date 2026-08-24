@@ -1,6 +1,12 @@
 # runpod-mcp — custom MCP server for the Learning-to-Swim replication
 
-Task-shaped tools (14) mirroring [runbook/RUNBOOK.md](../runbook/RUNBOOK.md)
+> **Standalone note:** this server was extracted (full history) from the
+> `learning-to-swim-replication` project. Relative links like
+> `../runbook/RUNBOOK.md` refer to that parent project and only resolve when
+> this repo sits inside it (or is symlinked there); the server itself runs
+> standalone.
+
+Task-shaped tools (14) mirroring the parent project's `runbook/RUNBOOK.md`
 instead of ~50 generic API mirrors. Custom because **no RunPod API executes
 commands on a pod** — the official MCP covers only the control plane; running
 pod_setup.sh, the axis sanity sweep, and training needs SSH + rsync, encoded
@@ -70,12 +76,31 @@ deadman.sh   → caffeinate -i wrapper around  python -m runpod_mcp.deadman (arm
   (e.g. `terminate lts-replication`), one job at a time per pod absent
   `force`.
 
+## Install / registration
+
+Register the server in a project's `.mcp.json` (Claude Code) with an
+absolute path to `run.sh` — `run.sh` bootstraps its own `.venv` on first
+launch:
+
+```json
+{
+  "mcpServers": {
+    "runpod": {
+      "command": "bash",
+      "args": ["/path/to/runpod-mcp/run.sh"]
+    }
+  }
+}
+```
+
 ## Setup
 
-1. **API key** (never on disk/git/argv — Keychain only):
+1. **API key** (never on disk/git/argv — macOS Keychain only; the server
+   reads it via `security find-generic-password` and scrubs `rpa_` values
+   from every error and log):
 
    ```
-   security add-generic-password -a kyle -s runpod-api-key -w '<KEY>'
+   security add-generic-password -a "$USER" -s runpod-api-key -w '<KEY>'
    ```
 
 2. **SSH key**: `~/.ssh/id_ed25519(.pub)` must exist; the `.pub` is injected
@@ -183,3 +208,7 @@ before ever swapping `image_name` in [pod_defaults.yaml](pod_defaults.yaml).
 - 4090 stock fluctuates per DC; the network volume pins one DC.
   `gpu_availability(data_center_id=...)` + ensure_pod's no-GPU recovery
   recipe cover it; worst case, create a second volume in another DC.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.deps-stamp
+.pytest_cache/
+
+# Environments / secrets (RunPod key lives in the macOS Keychain, never files)
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
