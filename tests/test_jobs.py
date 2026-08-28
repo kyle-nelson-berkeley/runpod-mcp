@@ -75,7 +75,7 @@ def test_launch_pushes_wrapper_cmd_meta_and_detaches():
     ssh = FakeSSH()
     jid = jobs.launch(ssh, "1.2.3.4", 15356,
                       name="setup", command="bash /workspace/pod_setup.sh",
-                      workdir="/workspace", pod_id="on2ghkedz0vbjr",
+                      workdir="/workspace", pod_id="fakefakefake00",
                       max_runtime_sec=5400, auto_stop=False)
     job_dir = f"/workspace/jobs/{jid}"
     pushed = dict(ssh.push_texts)
@@ -87,7 +87,7 @@ def test_launch_pushes_wrapper_cmd_meta_and_detaches():
     assert meta["auto_stop"] is False
     # detached launch line: setsid + argv-injected pod id + full detach redirs
     launch_cmd = ssh.run_calls[-1]
-    assert (f"setsid bash {jobs.WRAPPER_REMOTE} {job_dir} on2ghkedz0vbjr 5400 0"
+    assert (f"setsid bash {jobs.WRAPPER_REMOTE} {job_dir} fakefakefake00 5400 0"
             in launch_cmd)
     assert "</dev/null" in launch_cmd.replace("< /dev/null", "</dev/null")
     assert "&" in launch_cmd

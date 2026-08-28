@@ -8,7 +8,7 @@ from runpod_mcp import config, guardrails, jobs, tools, training
 from tests.conftest import REPO_ROOT, merged_cfg
 
 POD_RUNNING = {
-    "id": "on2ghkedz0vbjr", "name": "lts-replication", "desiredStatus": "RUNNING",
+    "id": "fakefakefake00", "name": "lts-replication", "desiredStatus": "RUNNING",
     "publicIp": "213.173.99.47", "portMappings": {"22": 15356},
     "costPerHr": 0.69, "networkVolumeId": "vol1",
     "lastStartedAt": "2026-07-03 13:25:25.682 +0000 UTC",
@@ -33,7 +33,7 @@ class FakeClient:
         self.created_pods = []
         self.created_volumes = []
         self.start_error = None
-        self.billing_pods_data = [{"podId": "on2ghkedz0vbjr", "amount": 0.56}]
+        self.billing_pods_data = [{"podId": "fakefakefake00", "amount": 0.56}]
         self.billing_vol_data = [{"amount": 0.01}]
 
     def list_pods(self):
@@ -183,7 +183,7 @@ def test_ensure_pod_resume_truncates_knownhosts_and_arms_watchdog():
                  ssh_results=[DRIVER_OK,            # driver probe
                               ok("WATCHDOG_ARMED")])  # watchdog arm
     out = tools.ensure_pod(rt)
-    assert "start_pod:on2ghkedz0vbjr" in rt.client.calls
+    assert "start_pod:fakefakefake00" in rt.client.calls
     assert out["status"] == "running"
     assert out["driver_version"] == "535.161.08"
     assert rt.ssh.truncated == 1                       # resume wipes host keys
@@ -205,7 +205,7 @@ def test_ensure_pod_already_running_still_rearms_guards():
     # OPS-DEFECTS-PLAN.md §3 u.7: the probe certifies READ, the watchdog needs
     # WRITE — never report a bare "armed"
     assert out["idle_watchdog"] == "armed (stop path unverified)"
-    assert "start_pod:on2ghkedz0vbjr" not in rt.client.calls
+    assert "start_pod:fakefakefake00" not in rt.client.calls
 
 
 def test_ensure_pod_refuses_pod_without_volume():
@@ -213,7 +213,7 @@ def test_ensure_pod_refuses_pod_without_volume():
     rt = make_rt(pods=[bare], volumes=[VOL])
     with pytest.raises(tools.ToolError, match="ephemeral"):
         tools.ensure_pod(rt)
-    assert "start_pod:on2ghkedz0vbjr" not in rt.client.calls
+    assert "start_pod:fakefakefake00" not in rt.client.calls
 
 
 def test_ensure_pod_refuses_mismatched_volume():
@@ -237,7 +237,7 @@ def test_ensure_pod_no_gpu_start_failure_returns_recovery_recipe():
     assert "terminate_pod" in recovery                 # sanctioned terminate case
     assert "gpu_availability" in recovery
     assert "volume" in recovery.lower()                # data survives
-    assert "delete_pod:on2ghkedz0vbjr" not in rt.client.calls  # never automatic
+    assert "delete_pod:fakefakefake00" not in rt.client.calls  # never automatic
 
 
 def test_ensure_pod_driver_floor_enforced():
@@ -483,14 +483,14 @@ def test_stop_pod_refuses_live_jobs():
                  ssh_results=[ok("20260703-1_train_ab\nLIVE_LIST_END\n")])
     with pytest.raises(guardrails.GuardrailError):
         tools.stop_pod(rt)
-    assert "stop_pod:on2ghkedz0vbjr" not in rt.client.calls
+    assert "stop_pod:fakefakefake00" not in rt.client.calls
 
 
 def test_stop_pod_force_stops():
     rt = make_rt(pods=[dict(POD_RUNNING)])
     out = tools.stop_pod(rt, force=True)
     assert out["status"] == "stopped"
-    assert "stop_pod:on2ghkedz0vbjr" in rt.client.calls
+    assert "stop_pod:fakefakefake00" in rt.client.calls
 
 
 def test_stop_pod_idempotent():
@@ -506,7 +506,7 @@ def test_terminate_requires_confirm():
     with pytest.raises(guardrails.GuardrailError):
         tools.terminate_pod(rt, confirm="yes please")
     out = tools.terminate_pod(rt, confirm="terminate lts-replication")
-    assert "delete_pod:on2ghkedz0vbjr" in rt.client.calls
+    assert "delete_pod:fakefakefake00" in rt.client.calls
     assert "volume" in json.dumps(out).lower()         # survives note
 
 
